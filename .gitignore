@@ -39,12 +39,9 @@ CLEANUP_REPORT.md
 assets.tar*
 
 # -------- PROPRIETARY REFERENCE MATERIALS --------
-# Contains:
-#   - decompiled Java from original APK (copyrighted)
-#   - extracted APK resources (XML, PNG, MP3, etc.)
-#   - proprietary native .so libraries from the game
-#   - extracted game assets (copyrighted textures, audio, models)
+# (decompiled code, extracted resources, proprietary libraries, etc.)
 reference/
+reference/**
 
 # -------- EXTRACTED GAME ASSETS --------
 # Commercial game assets extracted from the APK
