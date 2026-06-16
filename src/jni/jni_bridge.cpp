@@ -127,11 +127,12 @@ void JniBridge::call_handler(uint32_t address, void* emu_ptr) {
                 {"cosf",1},{"sinf",1},{"roundf",1},{"floorf",1},{"ceilf",1},
                 {"sqrtf",1},{"atan2f",1},{"powf",1},{"sincosf",1},
                 {"strtol",1},{"strtoul",1},{"atoi",1},{"atof",1},
+                {"wctob",1},{"btowc",1},{"__ctype_get_mb_cur_max",1},
                 {"pthread_mutex_init",1},{"pthread_mutex_lock",1},{"pthread_mutex_unlock",1},
                 {"pthread_mutex_destroy",1},{"pthread_cond_init",1},{"pthread_cond_signal",1},
                 {"pthread_cond_wait",1},{"pthread_cond_destroy",1},{"pthread_cond_broadcast",1},
             };
-            if (!quiet_funcs.count(func.name)) {
+            if (!quiet_funcs.count(func.name) || func.name == "GetMethodID") {
                 std::cout << "[Bridge] Call: " << func.name << std::endl;
             }
         }
@@ -594,12 +595,21 @@ void bridge_GetMethodID(void* emu_ptr) {
     uint32_t id;
     if (strcmp(name, "getPlatformConsentState") == 0) id = 0x13180001;
     else if (strcmp(name, "isAgeKnown") == 0) id = 0x13170001;
+    else if (strcmp(name, "enteredAge") == 0) id = 0x13170002;
+    else if (strcmp(name, "isAgeOfConsent") == 0) id = 0x13170003;
+    else if (strcmp(name, "hasPrivacyConsent") == 0) id = 0x13170004;
+    else if (strcmp(name, "isExplicitPrivacyConsent") == 0) id = 0x13170005;
+    else if (strcmp(name, "getAnalyticsId") == 0) id = 0x13170006;
+    else if (strcmp(name, "receivedPrivacyConsent") == 0) id = 0x13170007;
     else if (strcmp(name, "loadFile") == 0) id = 0x13190001;
     else if (strcmp(name, "play") == 0) id = 0x13200001;
     else if (strcmp(name, "pause") == 0) id = 0x13210001;
     else if (strcmp(name, "stop") == 0) id = 0x13220001;
     else if (strcmp(name, "setLooping") == 0) id = 0x13230001;
     else if (strcmp(name, "setVolume") == 0) id = 0x13240001;
+    else if (strcmp(name, "loadSnapshot") == 0) id = 0x13250001;
+    else if (strcmp(name, "isGoogleGameServicesAvailable") == 0) id = 0x13260001;
+    else if (strcmp(name, "startAdsAndAnalytics") == 0) id = 0x13270001;
     else if (strcmp(name, "<init>") == 0) id = 0x13000001;
     else id = 0x56780001;
     if (!emu->quiet_mode) {
@@ -805,6 +815,9 @@ static float g_music_volume = 1.0f;
 static ALuint g_music_source = 0;
 static ALuint g_music_buffer = 0;
 
+static int g_saved_age = 25; // Pre-set age to bypass age gate entirely
+bool g_snapshot_load_pending = false; // Set when game calls loadSnapshot, cleared after snapshotLoaded callback
+
 static bool load_wav_to_buffer(const std::string& path, ALuint buffer) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) return false;
@@ -1007,7 +1020,16 @@ void bridge_GetFloatField(void* emu_ptr) {
 
 void bridge_CallStaticObjectMethodV(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
-    emu->set_reg(0, 0);
+    uint32_t mid = emu->get_reg(2);
+    uint32_t res = 0;
+    if (mid == 0x13170006) { // getAnalyticsId
+        g_jstrings[0x99990000] = ""; // Ensure empty string handle is valid
+        res = 0x99990000;
+    } else {
+        res = 0;
+    }
+    std::cout << "[JNI] CallStaticObjectMethodV(mid=0x" << std::hex << mid << ") -> 0x" << res << std::dec << std::endl;
+    emu->set_reg(0, res);
 }
 
 void bridge_CallStaticBooleanMethodV(void* emu_ptr) {
@@ -1015,36 +1037,75 @@ void bridge_CallStaticBooleanMethodV(void* emu_ptr) {
     uint32_t mid = emu->get_reg(2);
     uint32_t res = 0;
     if (mid == 0x13170001) { // isAgeKnown
-        res = 0; // Return 0 (false) so the user answers it in-game
+        res = 1; // Always return true — bypass age gate entirely
+    } else if (mid == 0x13170003) { // isAgeOfConsent
+        res = 1; // Return true — user is old enough
+    } else if (mid == 0x13170004) { // hasPrivacyConsent
+        res = 1; // Always return true
+    } else if (mid == 0x13170005) { // isExplicitPrivacyConsent
+        res = 1; // Always return true
     } else if (mid == 0x13180001) { // getPlatformConsentState
-        res = 0; // Return 0 (false)
+        res = 3; // Return 3 — OBTAINED (consent already obtained by platform)
+    } else if (mid == 0x13260001) { // isGoogleGameServicesAvailable
+        res = 0; // Return false
     } else {
         res = 0;
     }
-    std::cout << "[JNI] CallStaticBooleanMethodV(mid=0x" << std::hex << mid << ") -> " << res << std::dec << std::endl;
+    if (!emu->quiet_mode) {
+        std::cout << "[JNI] CallStaticBooleanMethodV(mid=0x" << std::hex << mid << ") -> " << res << std::dec << std::endl;
+    }
     emu->set_reg(0, res);
 }
 
 void bridge_CallStaticIntMethodV(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
-    emu->set_reg(0, 0);
+    uint32_t mid = emu->get_reg(2);
+    int res = 0;
+    if (mid == 0x13180001) { // getPlatformConsentState — return 3 (OBTAINED)
+        res = 3;
+    }
+    if (!emu->quiet_mode) {
+        std::cout << "[JNI] CallStaticIntMethodV(mid=0x" << std::hex << mid << ") -> " << std::dec << res << std::endl;
+    }
+    emu->set_reg(0, res);
 }
 
 void bridge_CallStaticLongMethodV(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t mid = emu->get_reg(2);
+    std::cout << "[JNI] CallStaticLongMethodV(mid=0x" << std::hex << mid << ") -> 0" << std::dec << std::endl;
     emu->set_reg(0, 0);
     emu->set_reg(1, 0);
 }
 
 void bridge_CallStaticFloatMethodV(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t mid = emu->get_reg(2);
+    std::cout << "[JNI] CallStaticFloatMethodV(mid=0x" << std::hex << mid << ") -> 0" << std::dec << std::endl;
     emu->set_reg(0, 0);
 }
 
 void bridge_CallStaticVoidMethodV(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     uint32_t mid = emu->get_reg(2);
-    std::cout << "[JNI] CallStaticVoidMethodV(mid=0x" << std::hex << mid << ")" << std::dec << std::endl;
+    if (!emu->quiet_mode) {
+        std::cout << "[JNI] CallStaticVoidMethodV(mid=0x" << std::hex << mid << ")" << std::dec << std::endl;
+    }
+
+    if (mid == 0x13170002) { // enteredAge
+        uint8_t* memory = emu->get_memory_base();
+        uint32_t va_list_ptr = emu->get_reg(3);
+        int age = *(int*)(memory + va_list_ptr);
+        g_saved_age = age;
+        std::cout << "[JNI] enteredAge(" << age << ") -> Saved!" << std::endl;
+    } else if (mid == 0x13170007) { // receivedPrivacyConsent
+        std::cout << "[JNI] receivedPrivacyConsent() -> Stubbed!" << std::endl;
+    } else if (mid == 0x13250001) { // loadSnapshot
+        std::cout << "[JNI] loadSnapshot() -> Requesting callback!" << std::endl;
+        g_snapshot_load_pending = true;
+    } else if (mid == 0x13270001) { // startAdsAndAnalytics
+        std::cout << "[JNI] startAdsAndAnalytics() -> Stubbed!" << std::endl;
+    }
 }
 
 void bridge_GetStaticFieldID(void* emu_ptr) {
@@ -1081,6 +1142,23 @@ void bridge_GetObjectArrayElement(void* emu_ptr) {
 void bridge_NewIntArray(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     emu->set_reg(0, 0);
+}
+
+void bridge_NewByteArray(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    std::cout << "[JNI] NewByteArray() -> 0" << std::endl;
+    emu->set_reg(0, 0);
+}
+
+void bridge_GetByteArrayElements(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t array = emu->get_reg(1);
+    std::cout << "[JNI] GetByteArrayElements(array=0x" << std::hex << array << ") -> 0" << std::dec << std::endl;
+    emu->set_reg(0, 0); // Return null (no data)
+}
+
+void bridge_ReleaseByteArrayElements(void* emu_ptr) {
+    // No-op — nothing to release
 }
 
 void bridge_GetIntArrayElements(void* emu_ptr) {
@@ -1265,6 +1343,25 @@ void bridge_atof(void* emu_ptr) {
     if (std::isnan(res)) std::cout << "[Math] atof(\"" << str << "\") -> NaN!" << std::endl;
     if (!emu->quiet_mode) std::cout << "[Math] atof(\"" << str << "\") -> " << res << std::endl;
     emu->set_reg(0, float_to_uint(res));
+}
+
+// --- Wide Character / CType Bridges ---
+#include <cwchar>
+void bridge_wctob(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    wint_t wc = (wint_t)emu->get_reg(0);
+    emu->set_reg(0, (uint32_t)std::wctob(wc));
+}
+
+void bridge_btowc(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    int c = (int)emu->get_reg(0);
+    emu->set_reg(0, (uint32_t)std::btowc(c));
+}
+
+void bridge_ctype_cur_max(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    emu->set_reg(0, 1); // Return 1 for MB_CUR_MAX (simple ASCII/UTF-8 single byte for now)
 }
 
 #include <zlib.h>
@@ -1480,6 +1577,18 @@ void bridge_localtime(void* emu_ptr) {
     tm_guest[8] = t->tm_isdst;
     
     emu->set_reg(0, tm_guest_ptr);
+}
+
+void bridge_clock(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    clock_t res = clock();
+    emu->set_reg(0, (uint32_t)res);
+}
+
+void bridge_lrand48(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    long int res = lrand48();
+    emu->set_reg(0, (uint32_t)res);
 }
 
 void bridge_fputs(void* emu_ptr) {
@@ -1990,12 +2099,24 @@ void bridge_gl_clear_color(void* emu_ptr) {
     }
 }
 
+// Global resolution scaling (game renders at GAME_W x GAME_H, window is WIN_W x WIN_H)
+static int g_win_w = 1920;
+static int g_win_h = 1080;
+static const int GAME_W = 800;
+static const int GAME_H = 480;
+
 void bridge_gl_viewport(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.viewport_calls++;
-    GL_DIAG("glViewport(%d, %d, %d, %d)", emu->get_reg(0), emu->get_reg(1), emu->get_reg(2), emu->get_reg(3));
     if (g_display_active) {
-        glViewport(emu->get_reg(0), emu->get_reg(1), emu->get_reg(2), emu->get_reg(3));
+        int x = emu->get_reg(0);
+        int y = emu->get_reg(1);
+        int w = emu->get_reg(2);
+        int h = emu->get_reg(3);
+        // Scale from game coordinate space to actual window size
+        float sx = (float)g_win_w / GAME_W;
+        float sy = (float)g_win_h / GAME_H;
+        glViewport((int)(x * sx), (int)(y * sy), (int)(w * sx), (int)(h * sy));
     }
 }
 
@@ -2453,19 +2574,130 @@ void bridge_gl_tex_sub_image_2d(void* emu_ptr) {
     }
 }
 
+// ========================== ETC1 Software Decoder ==========================
+static inline int etc1_clamp(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
+
+static const int etc1_modifiers[8][2] = {
+    {  2,   8}, {  5,  17}, {  9,  29}, { 13,  42},
+    { 18,  56}, { 24,  71}, { 33,  92}, { 47, 127}
+};
+
+static void decode_etc1_block(const uint8_t* src, uint8_t* dst, int dst_stride) {
+    // Read 64-bit block (big-endian)
+    uint64_t block = 0;
+    for (int i = 0; i < 8; i++)
+        block = (block << 8) | src[i];
+    
+    int diff  = (block >> 33) & 1;
+    int flip  = (block >> 32) & 1;
+    int table1 = (block >> 37) & 7;
+    int table2 = (block >> 34) & 7;
+    
+    int r1, g1, b1, r2, g2, b2;
+    
+    if (diff == 0) {
+        // Individual mode: two RGB444 colors
+        int rr1 = (block >> 60) & 0xF; r1 = (rr1 << 4) | rr1;
+        int rr2 = (block >> 56) & 0xF; r2 = (rr2 << 4) | rr2;
+        int gg1 = (block >> 52) & 0xF; g1 = (gg1 << 4) | gg1;
+        int gg2 = (block >> 48) & 0xF; g2 = (gg2 << 4) | gg2;
+        int bb1 = (block >> 44) & 0xF; b1 = (bb1 << 4) | bb1;
+        int bb2 = (block >> 40) & 0xF; b2 = (bb2 << 4) | bb2;
+    } else {
+        // Differential mode: RGB555 + RGB333 delta
+        int r = (block >> 59) & 0x1F;
+        int dr = (block >> 56) & 0x7; if (dr > 3) dr -= 8;
+        int g = (block >> 51) & 0x1F;
+        int dg = (block >> 48) & 0x7; if (dg > 3) dg -= 8;
+        int b = (block >> 43) & 0x1F;
+        int db = (block >> 40) & 0x7; if (db > 3) db -= 8;
+        
+        r1 = (r << 3) | (r >> 2);
+        int r2v = r + dr; r2 = (r2v << 3) | (r2v >> 2);
+        g1 = (g << 3) | (g >> 2);
+        int g2v = g + dg; g2 = (g2v << 3) | (g2v >> 2);
+        b1 = (b << 3) | (b >> 2);
+        int b2v = b + db; b2 = (b2v << 3) | (b2v >> 2);
+    }
+    
+    for (int col = 0; col < 4; col++) {
+        for (int row = 0; row < 4; row++) {
+            int pixel_idx = col * 4 + row;
+            
+            int msb = (block >> (pixel_idx + 16)) & 1;
+            int lsb = (block >> pixel_idx) & 1;
+            
+            // Determine sub-block
+            int sub;
+            if (flip == 0) sub = (col >= 2) ? 1 : 0;
+            else           sub = (row >= 2) ? 1 : 0;
+            
+            int rb = sub ? r2 : r1;
+            int gb = sub ? g2 : g1;
+            int bb = sub ? b2 : b1;
+            int table = sub ? table2 : table1;
+            
+            int mod = etc1_modifiers[table][lsb];
+            if (msb) mod = -mod;
+            
+            uint8_t* pixel = dst + row * dst_stride + col * 4;
+            pixel[0] = etc1_clamp(rb + mod);
+            pixel[1] = etc1_clamp(gb + mod);
+            pixel[2] = etc1_clamp(bb + mod);
+            pixel[3] = 255; // ETC1 is always opaque
+        }
+    }
+}
+
 void bridge_gl_compressed_tex_image_2d(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.tex_uploads++;
     uint8_t* memory = emu->get_memory_base();
+    uint32_t target = emu->get_reg(0);
+    uint32_t level = emu->get_reg(1);
+    uint32_t internalformat = emu->get_reg(2);
     uint32_t width = emu->get_reg(3);
     uint32_t sp = emu->get_reg(13);
     uint32_t height = *(uint32_t*)(memory + sp);
-    uint32_t image_size = *(uint32_t*)(memory + sp + 12);
-    uint32_t data_ptr = *(uint32_t*)(memory + sp + 16);
-    TEX_LOG("glCompressedTexImage2D(%ux%u size=%u data=0x%x) [skipped — no desktop decoder]",
-            width, height, image_size, data_ptr);
-    // Compressed textures (ETC1/PVRTC) are not natively supported on desktop GL.
-    // We'll skip these for now — the engine will fall back to PNG.
+    uint32_t border = *(uint32_t*)(memory + sp + 4);
+    uint32_t image_size = *(uint32_t*)(memory + sp + 8);
+    uint32_t data_ptr = *(uint32_t*)(memory + sp + 12);
+    
+    // ETC1_RGB8_OES = 0x8D64
+    if (!g_display_active || data_ptr == 0) return;
+    
+    if (internalformat == 0x8D64) {
+        // Decode ETC1 to RGBA8888
+        const uint8_t* src = memory + data_ptr;
+        uint32_t block_w = (width + 3) / 4;
+        uint32_t block_h = (height + 3) / 4;
+        
+        std::vector<uint8_t> rgba(width * height * 4, 255);
+        
+        for (uint32_t by = 0; by < block_h; by++) {
+            for (uint32_t bx = 0; bx < block_w; bx++) {
+                uint8_t block_rgba[4 * 4 * 4]; // 4x4 pixels * RGBA
+                decode_etc1_block(src + (by * block_w + bx) * 8, block_rgba, 4 * 4);
+                
+                // Copy decoded block to output (clamp to image bounds)
+                for (int row = 0; row < 4 && (by * 4 + row) < height; row++) {
+                    for (int col = 0; col < 4 && (bx * 4 + col) < width; col++) {
+                        int dst_x = bx * 4 + col;
+                        int dst_y = by * 4 + row;
+                        memcpy(&rgba[(dst_y * width + dst_x) * 4],
+                               &block_rgba[row * 16 + col * 4], 4);
+                    }
+                }
+            }
+        }
+        
+        glTexImage2D(target, level, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        std::cout << "[ETC1] Decoded " << width << "x" << height << " texture (" 
+                  << (block_w * block_h) << " blocks)" << std::endl;
+    } else {
+        std::cout << "[GL] glCompressedTexImage2D: unknown format 0x" 
+                  << std::hex << internalformat << std::dec << " — skipped" << std::endl;
+    }
 }
 
 void bridge_gl_tex_parameteri(void* emu_ptr) {
@@ -2700,8 +2932,8 @@ void bridge_glGetString(void* emu_ptr) {
     if (!initialized) {
         strcpy((char*)(memory + 0x40000), "OpenGL ES 2.0 (Swordigo Desktop)");
         strcpy((char*)(memory + 0x40100), "Swordigo Desktop Emulator");
-        // Include PVRTC extension for PowerVR texture support
-        strcpy((char*)(memory + 0x40200), "GL_OES_texture_npot GL_OES_compressed_ETC1_RGB8_texture GL_IMG_texture_compression_pvrtc");
+        // Advertise ETC1 support — we decode it in software via bridge_gl_compressed_tex_image_2d
+        strcpy((char*)(memory + 0x40200), "GL_OES_texture_npot GL_OES_compressed_ETC1_RGB8_texture");
         initialized = true;
     }
     uint32_t name = emu->get_reg(0);
@@ -3018,6 +3250,9 @@ void JniBridge::init_standard_bridges() {
     register_handler("strtoul", bridge_strtoul);
     register_handler("atoi", bridge_atoi);
     register_handler("atof", bridge_atof);
+    register_handler("wctob", bridge_wctob);
+    register_handler("btowc", bridge_btowc);
+    register_handler("__ctype_get_mb_cur_max", bridge_ctype_cur_max);
 
     register_handler("__aeabi_memclr", bridge_aeabi_memclr);
     register_handler("__aeabi_memclr4", bridge_aeabi_memclr);
@@ -3104,6 +3339,8 @@ void JniBridge::init_standard_bridges() {
     register_handler("__google_potentially_blocking_region_begin", bridge_google_blocking);
     register_handler("__google_potentially_blocking_region_end", bridge_google_blocking);
     register_handler("time", bridge_time);
+    register_handler("clock", bridge_clock);
+    register_handler("lrand48", bridge_lrand48);
     register_handler("localtime", bridge_localtime);
     register_handler("clock_gettime", bridge_clock_gettime);
     register_handler("gettimeofday", bridge_gettimeofday);
@@ -3170,6 +3407,9 @@ void JniBridge::init_standard_bridges() {
     register_handler("GetArrayLength", bridge_GetArrayLength);
     register_handler("GetObjectArrayElement", bridge_GetObjectArrayElement);
     register_handler("NewIntArray", bridge_NewIntArray);
+    register_handler("NewByteArray", bridge_NewByteArray);
+    register_handler("GetByteArrayElements", bridge_GetByteArrayElements);
+    register_handler("ReleaseByteArrayElements", bridge_ReleaseByteArrayElements);
     register_handler("GetIntArrayElements", bridge_GetIntArrayElements);
     register_handler("ReleaseIntArrayElements", bridge_ReleaseIntArrayElements);
     register_handler("SetIntArrayRegion", bridge_SetIntArrayRegion);

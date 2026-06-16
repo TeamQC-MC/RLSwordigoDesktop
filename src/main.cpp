@@ -11,6 +11,7 @@
 #define GL_GLEXT_PROTOTYPES
 #include <GL/gl.h>
 #include <GL/glext.h>
+#include <sys/stat.h>
 
 extern bool g_display_active;
 
@@ -114,8 +115,11 @@ uint32_t setup_jni_env(uint8_t* memory) {
     *(uint32_t*)(memory + vtable_ptr + 0x2A8) = g_bridge.get_address("ReleaseStringUTFChars");
     *(uint32_t*)(memory + vtable_ptr + 0x2AC) = g_bridge.get_address("GetArrayLength");
     *(uint32_t*)(memory + vtable_ptr + 0x2B4) = g_bridge.get_address("GetObjectArrayElement");
+    *(uint32_t*)(memory + vtable_ptr + 0x2C0) = g_bridge.get_address("NewByteArray");          // Slot 176
     *(uint32_t*)(memory + vtable_ptr + 0x2CC) = g_bridge.get_address("NewIntArray");
+    *(uint32_t*)(memory + vtable_ptr + 0x2E0) = g_bridge.get_address("GetByteArrayElements");  // Slot 184
     *(uint32_t*)(memory + vtable_ptr + 0x2EC) = g_bridge.get_address("GetIntArrayElements");
+    *(uint32_t*)(memory + vtable_ptr + 0x300) = g_bridge.get_address("ReleaseByteArrayElements"); // Slot 192
     *(uint32_t*)(memory + vtable_ptr + 0x30C) = g_bridge.get_address("ReleaseIntArrayElements");
     *(uint32_t*)(memory + vtable_ptr + 0x34C) = g_bridge.get_address("SetIntArrayRegion");
     *(uint32_t*)(memory + vtable_ptr + 0x35C) = g_bridge.get_address("RegisterNatives");
@@ -227,7 +231,7 @@ void load_and_boot() {
     }
     if (initMusicPlayer) {
         std::cout << "[Boot] Calling initMusicPlayer" << std::endl;
-        g_emulator->call(initMusicPlayer, {env_ptr, 0});
+        g_emulator->call(initMusicPlayer, {env_ptr, 0x22222222}); // pass non-zero fake MusicPlayer object to enable music callbacks
     }
     if (setupNative) {
         std::cout << "[Boot] Calling setupNativeInterface" << std::endl;
@@ -250,6 +254,13 @@ void load_and_boot() {
     uint32_t updateApp = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_updateApplication");
     uint32_t drawApp = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_drawApplication");
     uint32_t handleTouchEvent = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_handleTouchEvent");
+    uint32_t snapshotLoaded = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_snapshotLoaded");
+    
+    // Tell the game that Google Sign-In failed (services not available)
+    if (googleSignInCompleted) {
+        std::cout << "[Boot] Calling googleSignInCompleted(false) — no Google Play services" << std::endl;
+        g_emulator->call(googleSignInCompleted, {env_ptr, 0, 0}); // (env, this, false)
+    }
 
     if (updateApp && drawApp) {
         // IEEE 754 for 1/60 (~0.01667f) = 0x3c888889
@@ -289,30 +300,100 @@ void load_and_boot() {
         bool key_magic = false;
         bool key_use_item = false;
         bool key_menu = false;
+        bool gui_visible = false; // F1 toggle for GUI overlay
 
         bool running = true;
         while (running) {
             g_frame_stats.reset();
             
-            // Show details for first 2 frames to trace scene loading
-            if (completed_frames < 2) {
+            // Show details for first 100 frames to trace initialization
+            if (completed_frames < 100) {
                 g_emulator->quiet_mode = false;
             } else {
                 g_emulator->quiet_mode = true;
             }
             
-            if (completed_frames == 5) {
-                std::cout << "[Test] Simulating touch event (mouse click) in headless mode..." << std::endl;
-                g_emulator->quiet_mode = false; // Turn on logging
-                float x = 400.0f; // Click center
-                float y = 240.0f;
-                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 1, 1, 0.0, x, y, x, y, 1);
-                if (x >= 200.0f) {
-                    call_handle_touch_event(handleTouchEvent, env_ptr, 0, 1, 8, 0.0, 658.0f, 83.0f, 658.0f, 83.0f, 1);
-                }
-            }
+            // --- Send TOUCH_MOVED every frame for held keys (matches Vita port fakeInput macro) ---
+            if (key_left)
+                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 6, 0.0, 50.0f, 83.0f, 50.0f, 83.0f, 0);
+            if (key_right)
+                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 7, 0.0, 129.0f, 83.0f, 129.0f, 83.0f, 0);
+            if (key_jump)
+                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 5, 0.0, 750.0f, 83.0f, 750.0f, 83.0f, 0);
+            if (key_attack)
+                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 8, 0.0, 658.0f, 83.0f, 658.0f, 83.0f, 0);
+
             g_emulator->call(updateApp, {env_ptr, 0, dt_hex});
+            
+            // Handle async callbacks: if loadSnapshot was called, call snapshotLoaded(null_name, null_data)
+            extern bool g_snapshot_load_pending;
+            if (g_snapshot_load_pending && snapshotLoaded) {
+                g_snapshot_load_pending = false;
+                std::cout << "[Callback] Calling snapshotLoaded(null, null) — no saved game" << std::endl;
+                g_emulator->call(snapshotLoaded, {env_ptr, 0, 0, 0}); // (env, this, name=null, data=null)
+            }
+            
             g_emulator->call(drawApp, {env_ptr, 0});
+
+            // ===================== F1 GUI Overlay =====================
+            if (gui_visible && g_display_active) {
+                // Save GL state
+                glPushAttrib(GL_ALL_ATTRIB_BITS);
+                glMatrixMode(GL_PROJECTION);
+                glPushMatrix();
+                glLoadIdentity();
+                glOrtho(0, 1920, 0, 1080, -1, 1);
+                glMatrixMode(GL_MODELVIEW);
+                glPushMatrix();
+                glLoadIdentity();
+                glDisable(GL_DEPTH_TEST);
+                glDisable(GL_TEXTURE_2D);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+                // Menu bar background
+                glColor4f(0.08f, 0.08f, 0.12f, 0.95f);
+                glBegin(GL_QUADS);
+                glVertex2f(0, 1080); glVertex2f(1920, 1080);
+                glVertex2f(1920, 1044); glVertex2f(0, 1044);
+                glEnd();
+
+                // Menu headings: File | Emulation | Help | About
+                float menu_items[] = {15, 120, 240, 440, 560};
+                for (int i = 0; i < 4; i++) {
+                    float x1 = menu_items[i], x2 = menu_items[i+1] - 8;
+                    glColor4f(0.18f, 0.18f, 0.24f, 0.95f);
+                    glBegin(GL_QUADS);
+                    glVertex2f(x1, 1078); glVertex2f(x2, 1078);
+                    glVertex2f(x2, 1046); glVertex2f(x1, 1046);
+                    glEnd();
+                    glColor4f(0.35f, 0.55f, 0.95f, 0.9f);
+                    glLineWidth(2.0f);
+                    glBegin(GL_LINE_LOOP);
+                    glVertex2f(x1, 1078); glVertex2f(x2, 1078);
+                    glVertex2f(x2, 1046); glVertex2f(x1, 1046);
+                    glEnd();
+                }
+
+                // Bottom status bar
+                glColor4f(0.06f, 0.06f, 0.09f, 0.9f);
+                glBegin(GL_QUADS);
+                glVertex2f(0, 36); glVertex2f(1920, 36);
+                glVertex2f(1920, 0); glVertex2f(0, 0);
+                glEnd();
+                glColor4f(0.3f, 0.5f, 0.9f, 0.8f);
+                glBegin(GL_LINES);
+                glVertex2f(0, 1044); glVertex2f(1920, 1044);
+                glVertex2f(0, 36); glVertex2f(1920, 36);
+                glEnd();
+
+                // Restore GL state
+                glMatrixMode(GL_MODELVIEW);
+                glPopMatrix();
+                glMatrixMode(GL_PROJECTION);
+                glPopMatrix();
+                glPopAttrib();
+            }
             
             extern int g_gl_diag_frame;
             g_gl_diag_frame++;
@@ -355,22 +436,18 @@ void load_and_boot() {
                         case SDL_MOUSEBUTTONDOWN:
                             if (event.button.button == SDL_BUTTON_LEFT) {
                                 mouse_pressed = true;
-                                float x = event.button.x;
-                                float y = 480.0f - event.button.y;
+                                float x = event.button.x * 800.0f / 1920.0f;
+                                float y = 480.0f - (event.button.y * 480.0f / 1080.0f);
                                 last_mouse_x = x;
                                 last_mouse_y = y;
                                 // Primary touch click
                                 call_handle_touch_event(handleTouchEvent, env_ptr, 0, 1, 1, 0.0, x, y, x, y, 1);
-                                // If click is on the right side of the screen, also trigger Attack button
-                                if (x >= 200.0f) {
-                                    call_handle_touch_event(handleTouchEvent, env_ptr, 0, 1, 8, 0.0, 658.0f, 83.0f, 658.0f, 83.0f, 1);
-                                }
                             }
                             break;
                         case SDL_MOUSEMOTION:
                             if (mouse_pressed) {
-                                float x = event.motion.x;
-                                float y = 480.0f - event.motion.y;
+                                float x = event.motion.x * 800.0f / 1920.0f;
+                                float y = 480.0f - (event.motion.y * 480.0f / 1080.0f);
                                 call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 1, 0.0, x, y, last_mouse_x, last_mouse_y, 0);
                                 last_mouse_x = x;
                                 last_mouse_y = y;
@@ -379,17 +456,20 @@ void load_and_boot() {
                         case SDL_MOUSEBUTTONUP:
                             if (event.button.button == SDL_BUTTON_LEFT) {
                                 mouse_pressed = false;
-                                float x = event.button.x;
-                                float y = 480.0f - event.button.y;
+                                float x = event.button.x * 800.0f / 1920.0f;
+                                float y = 480.0f - (event.button.y * 480.0f / 1080.0f);
                                 call_handle_touch_event(handleTouchEvent, env_ptr, 0, 2, 1, 0.0, x, y, last_mouse_x, last_mouse_y, 0);
-                                if (last_mouse_x >= 200.0f || x >= 200.0f) {
-                                    call_handle_touch_event(handleTouchEvent, env_ptr, 0, 2, 8, 0.0, 658.0f, 83.0f, 658.0f, 83.0f, 0);
-                                }
                                 last_mouse_x = -1.0f;
                                 last_mouse_y = -1.0f;
                             }
                             break;
                         case SDL_KEYDOWN:
+                            if (event.key.keysym.sym == SDLK_F1 && !event.key.repeat) {
+                                gui_visible = !gui_visible;
+                                std::cout << "[GUI] Menu overlay " << (gui_visible ? "ON" : "OFF") << std::endl;
+                                break;
+                            }
+                            // fall through
                         case SDL_KEYUP: {
                             bool is_down = (event.type == SDL_KEYDOWN);
                             switch (event.key.keysym.sym) {
@@ -397,6 +477,7 @@ void load_and_boot() {
                                 case SDLK_a:
                                     if (key_left != is_down) {
                                         key_left = is_down;
+                                        // Vita: (60, 94) @ 960x544 → scaled to 800x480: (50, 83)
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 6, 0.0, 50.0f, 83.0f, 50.0f, 83.0f, is_down ? 1 : 0);
                                     }
                                     break;
@@ -404,6 +485,7 @@ void load_and_boot() {
                                 case SDLK_d:
                                     if (key_right != is_down) {
                                         key_right = is_down;
+                                        // Vita: (155, 94) @ 960x544 → scaled to 800x480: (129, 83)
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 7, 0.0, 129.0f, 83.0f, 129.0f, 83.0f, is_down ? 1 : 0);
                                     }
                                     break;
@@ -412,6 +494,7 @@ void load_and_boot() {
                                 case SDLK_w:
                                     if (key_jump != is_down) {
                                         key_jump = is_down;
+                                        // Vita: (900, 94) @ 960x544 → scaled: (750, 83)
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 5, 0.0, 750.0f, 83.0f, 750.0f, 83.0f, is_down ? 1 : 0);
                                     }
                                     break;
@@ -419,6 +502,7 @@ void load_and_boot() {
                                 case SDLK_z:
                                     if (key_attack != is_down) {
                                         key_attack = is_down;
+                                        // Vita: (790, 94) @ 960x544 → scaled: (658, 83)
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 8, 0.0, 658.0f, 83.0f, 658.0f, 83.0f, is_down ? 1 : 0);
                                     }
                                     break;
@@ -426,18 +510,21 @@ void load_and_boot() {
                                 case SDLK_x:
                                     if (key_magic != is_down) {
                                         key_magic = is_down;
+                                        // Vita: (900, 184) @ 960x544 → scaled: (750, 162)
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 10, 0.0, 750.0f, 162.0f, 750.0f, 162.0f, is_down ? 1 : 0);
                                     }
                                     break;
                                 case SDLK_i:
                                     if (key_use_item != is_down) {
                                         key_use_item = is_down;
+                                        // Vita: (425, 54) @ 960x544 → scaled: (354, 48)
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 12, 0.0, 354.0f, 48.0f, 354.0f, 48.0f, is_down ? 1 : 0);
                                     }
                                     break;
                                 case SDLK_ESCAPE:
                                     if (key_menu != is_down) {
                                         key_menu = is_down;
+                                        // Vita: (48, 500) @ 960x544 → scaled: (40, 441)
                                         call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 9, 0.0, 40.0f, 441.0f, 40.0f, 441.0f, is_down ? 1 : 0);
                                     }
                                     break;
@@ -516,10 +603,13 @@ int main(int argc, char* argv[]) {
     Display display;
     
     if (!headless) {
-        if (display.init(800, 480, "Swordigo Desktop")) {
+        if (display.init(1920, 1080, "Swordigo Desktop")) {
             g_display_active = true;
             g_display_ptr = &display;
-            std::cout << "[Main] Display initialized — visual mode (real GL rendering)" << std::endl;
+            std::cout << "[Main] Display initialized — 1920x1080 HD mode" << std::endl;
+            // Create save directory if it doesn't exist
+            mkdir("./save", 0755);
+            mkdir("./cache", 0755);
         } else {
             std::cerr << "[Main] Display init failed, falling back to headless" << std::endl;
         }
