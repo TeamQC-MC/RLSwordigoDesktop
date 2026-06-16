@@ -1,0 +1,9 @@
+#!/bin/sh
+SELF=$(readlink -f "$0")
+HERE=$(dirname "$SELF")
+
+# Set paths so the loader finds the assets and game library relative to the AppImage
+export SWORDIGO_DATA_DIR="$HERE/usr/share/swordigo/"
+export LD_LIBRARY_PATH="$HERE/usr/lib:$HERE/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+
+exec "$HERE/usr/bin/swordigo_boot" "$@"

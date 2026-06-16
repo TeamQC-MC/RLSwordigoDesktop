@@ -13,7 +13,11 @@
 #include <GL/glext.h>
 #include <sys/stat.h>
 
+#include "platform/gui.h"
+
 extern bool g_display_active;
+extern int g_win_w;
+extern int g_win_h;
 
 // --- Global Context ---
 uint8_t* g_guest_memory = nullptr;
@@ -27,6 +31,29 @@ so_module g_main_mod;
 ElfLoader* g_loader = nullptr;
 JniBridge g_bridge;
 Emulator* g_emulator = nullptr;
+GuiRenderer g_gui;
+
+extern std::string g_save_dir;  // Defined in jni_bridge.cpp
+std::string g_cache_dir;
+
+std::string get_data_path(const std::string& relative_path) {
+    const char* env_dir = getenv("SWORDIGO_DATA_DIR");
+    std::string base_dir;
+    if (env_dir) {
+        base_dir = env_dir;
+    } else {
+#ifdef SWORDIGO_DATA_DIR
+        base_dir = SWORDIGO_DATA_DIR;
+#else
+        base_dir = "./";
+#endif
+    }
+    // Ensure base_dir ends with a slash if not empty
+    if (!base_dir.empty() && base_dir.back() != '/') {
+        base_dir += "/";
+    }
+    return base_dir + relative_path;
+}
 
 void call_handle_touch_event(uint32_t addr, uint32_t env, uint32_t obj, int action, int id, double time_val, float x, float y, float old_x, float old_y, int tap_count) {
     if (addr == 0) return;
@@ -64,7 +91,8 @@ void init_all() {
     g_guest_memory = new uint8_t[GUEST_MEM_SIZE];
     g_loader = new ElfLoader(g_guest_memory, GUEST_MEM_SIZE);
     g_bridge.init_standard_bridges();
-    asset_manager_init("assets");
+    asset_manager_init(get_data_path("assets").c_str());
+    g_gui.init();
     std::cout << "[Main] Infrastructure initialized." << std::endl;
 }
 
@@ -141,7 +169,7 @@ uint32_t setup_jni_env(uint8_t* memory) {
 }
 
 void load_and_boot() {
-    std::string so_path = "libswordigo.so";
+    std::string so_path = get_data_path("libswordigo.so");
     uint32_t load_addr = 0x1000000;
     
     // 1. Load ELF
@@ -202,11 +230,11 @@ void load_and_boot() {
     // Allocate some strings in guest memory for paths
     uint32_t path_ptr = 0x20000;
     uint32_t files_dir = path_ptr;
-    strcpy((char*)(g_guest_memory + files_dir), "./save");
+    strcpy((char*)(g_guest_memory + files_dir), g_save_dir.c_str());
     path_ptr += 100;
     
     uint32_t cache_dir = path_ptr;
-    strcpy((char*)(g_guest_memory + cache_dir), "./cache");
+    strcpy((char*)(g_guest_memory + cache_dir), g_cache_dir.c_str());
     path_ptr += 100;
 
     if (setFilesDir) {
@@ -243,7 +271,7 @@ void load_and_boot() {
     }
     if (setApplicationViewSize) {
         std::cout << "[Boot] Calling setApplicationViewSize" << std::endl;
-        g_emulator->call(setApplicationViewSize, {env_ptr, 0, 800, 480, 1}); // 800x480, is_pad=1
+        g_emulator->call(setApplicationViewSize, {env_ptr, 0, 960, 544, 1}); // Match Vita port: 960x544
     }
     if (applicationDidBecomeActive) {
         std::cout << "[Boot] Calling applicationDidBecomeActive" << std::endl;
@@ -263,8 +291,16 @@ void load_and_boot() {
     }
 
     if (updateApp && drawApp) {
-        // IEEE 754 for 1/60 (~0.01667f) = 0x3c888889
-        uint32_t dt_hex = 0x3c888889;
+        // Real delta time
+        Uint32 last_ticks = SDL_GetTicks();
+        double accumulated_time = 0.0;
+        bool gui_visible = false;  // GUI hidden by default
+        bool debug_visible = false;  // F3 debug overlay
+        bool hint_shown = false;  // One-time "Press F1" hint
+        Uint32 hint_start_time = SDL_GetTicks();  // Show hint for first 5 seconds
+        float fps = 0.0f;
+        Uint32 fps_last_time = SDL_GetTicks();
+        int fps_frame_count = 0;
         
         const int TARGET_FRAMES = g_display_active ? 0 : 1000; // 0 = infinite
         int completed_frames = 0;
@@ -288,10 +324,13 @@ void load_and_boot() {
         // Get the display pointer from main (passed via extern)
         extern Display* g_display_ptr;
 
-        // Input states for touch mapping
+        // Input states for touch mapping and GUI integration
+        int mouse_x = 0;
+        int mouse_y = 0;
+        bool mouse_pressed = false;
+        bool click_swallowed_by_gui = false;
         float last_mouse_x = -1.0f;
         float last_mouse_y = -1.0f;
-        bool mouse_pressed = false;
 
         bool key_left = false;
         bool key_right = false;
@@ -300,11 +339,20 @@ void load_and_boot() {
         bool key_magic = false;
         bool key_use_item = false;
         bool key_menu = false;
-        bool gui_visible = false; // F1 toggle for GUI overlay
 
         bool running = true;
         while (running) {
             g_frame_stats.reset();
+            
+            // Real delta time
+            Uint32 now_ticks = SDL_GetTicks();
+            float dt_seconds = (now_ticks - last_ticks) / 1000.0f;
+            if (dt_seconds > 0.1f) dt_seconds = 0.016666668f;
+            if (dt_seconds < 0.001f) dt_seconds = 0.016666668f;
+            last_ticks = now_ticks;
+            accumulated_time += dt_seconds;
+            uint32_t dt_hex;
+            memcpy(&dt_hex, &dt_seconds, 4);
             
             // Show details for first 10 frames only
             if (completed_frames < 10) {
@@ -313,15 +361,17 @@ void load_and_boot() {
                 g_emulator->quiet_mode = true;
             }
             
-            // --- Send TOUCH_MOVED every frame for held keys (matches Vita port fakeInput macro) ---
+            // --- Send TOUCH_MOVED every frame for held keys (Vita exact coords 960x544) ---
             if (key_left)
-                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 6, 0.0, 50.0f, 83.0f, 50.0f, 83.0f, 0);
+                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 6, accumulated_time, 60.0f, 94.0f, 60.0f, 94.0f, 0);
             if (key_right)
-                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 7, 0.0, 129.0f, 83.0f, 129.0f, 83.0f, 0);
+                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 7, accumulated_time, 155.0f, 94.0f, 155.0f, 94.0f, 0);
             if (key_jump)
-                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 5, 0.0, 750.0f, 83.0f, 750.0f, 83.0f, 0);
+                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 5, accumulated_time, 900.0f, 94.0f, 900.0f, 94.0f, 0);
             if (key_attack)
-                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 8, 0.0, 658.0f, 83.0f, 658.0f, 83.0f, 0);
+                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 8, accumulated_time, 790.0f, 94.0f, 790.0f, 94.0f, 0);
+            if (key_magic)
+                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 10, accumulated_time, 900.0f, 184.0f, 900.0f, 184.0f, 0);
 
             g_emulator->call(updateApp, {env_ptr, 0, dt_hex});
             
@@ -348,60 +398,81 @@ void load_and_boot() {
             
             g_emulator->call(drawApp, {env_ptr, 0});
 
-            // ===================== F1 GUI Overlay =====================
-            if (gui_visible && g_display_active) {
-                // Save GL state
+            // Render GUI overlay (F1 toggle)
+            if (g_display_active && gui_visible) {
+                g_gui.render(mouse_x, mouse_y, mouse_pressed);
+            }
+            
+            // Render F3 debug overlay
+            if (g_display_active && debug_visible) {
                 glPushAttrib(GL_ALL_ATTRIB_BITS);
+                glViewport(0, 0, g_win_w, g_win_h);
                 glMatrixMode(GL_PROJECTION);
                 glPushMatrix();
                 glLoadIdentity();
-                glOrtho(0, 1920, 0, 1080, -1, 1);
+                glOrtho(0, g_win_w, 0, g_win_h, -1, 1);
                 glMatrixMode(GL_MODELVIEW);
                 glPushMatrix();
                 glLoadIdentity();
-                glDisable(GL_DEPTH_TEST);
                 glDisable(GL_TEXTURE_2D);
+                glDisable(GL_LIGHTING);
+                glDisable(GL_DEPTH_TEST);
                 glEnable(GL_BLEND);
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-                // Menu bar background
-                glColor4f(0.08f, 0.08f, 0.12f, 0.95f);
+                // Dark background strip
+                glColor4ub(0, 0, 0, 180);
                 glBegin(GL_QUADS);
-                glVertex2f(0, 1080); glVertex2f(1920, 1080);
-                glVertex2f(1920, 1044); glVertex2f(0, 1044);
+                glVertex2f(10, g_win_h - 10); glVertex2f(420, g_win_h - 10);
+                glVertex2f(420, g_win_h - 200); glVertex2f(10, g_win_h - 200);
                 glEnd();
-
-                // Menu headings: File | Emulation | Help | About
-                float menu_items[] = {15, 120, 240, 440, 560};
-                for (int i = 0; i < 4; i++) {
-                    float x1 = menu_items[i], x2 = menu_items[i+1] - 8;
-                    glColor4f(0.18f, 0.18f, 0.24f, 0.95f);
-                    glBegin(GL_QUADS);
-                    glVertex2f(x1, 1078); glVertex2f(x2, 1078);
-                    glVertex2f(x2, 1046); glVertex2f(x1, 1046);
-                    glEnd();
-                    glColor4f(0.35f, 0.55f, 0.95f, 0.9f);
-                    glLineWidth(2.0f);
-                    glBegin(GL_LINE_LOOP);
-                    glVertex2f(x1, 1078); glVertex2f(x2, 1078);
-                    glVertex2f(x2, 1046); glVertex2f(x1, 1046);
-                    glEnd();
-                }
-
-                // Bottom status bar
-                glColor4f(0.06f, 0.06f, 0.09f, 0.9f);
-                glBegin(GL_QUADS);
-                glVertex2f(0, 36); glVertex2f(1920, 36);
-                glVertex2f(1920, 0); glVertex2f(0, 0);
-                glEnd();
-                glColor4f(0.3f, 0.5f, 0.9f, 0.8f);
-                glBegin(GL_LINES);
-                glVertex2f(0, 1044); glVertex2f(1920, 1044);
-                glVertex2f(0, 36); glVertex2f(1920, 36);
-                glEnd();
-
-                // Restore GL state
+                // FPS text using simple pixel rendering
+                char dbg[256];
+                snprintf(dbg, sizeof(dbg), "FPS: %.1f", fps);
+                g_gui.draw_string(dbg, 20, g_win_h - 35, 2.0f, 0, 255, 100, 255);
+                snprintf(dbg, sizeof(dbg), "Frame: %d", completed_frames);
+                g_gui.draw_string(dbg, 20, g_win_h - 60, 1.4f, 200, 200, 200, 255);
+                snprintf(dbg, sizeof(dbg), "Draws: %d  TexBinds: %d", g_frame_stats.draw_calls, g_frame_stats.texture_binds);
+                g_gui.draw_string(dbg, 20, g_win_h - 80, 1.2f, 180, 180, 180, 255);
+                snprintf(dbg, sizeof(dbg), "Verts: %d  MatOps: %d", g_frame_stats.vertices_submitted, g_frame_stats.matrix_ops);
+                g_gui.draw_string(dbg, 20, g_win_h - 97, 1.2f, 180, 180, 180, 255);
+                snprintf(dbg, sizeof(dbg), "State: %d  TexUps: %d", g_frame_stats.state_changes, g_frame_stats.tex_uploads);
+                g_gui.draw_string(dbg, 20, g_win_h - 114, 1.2f, 180, 180, 180, 255);
+                snprintf(dbg, sizeof(dbg), "Game: 960x544 -> Window: %dx%d", g_win_w, g_win_h);
+                g_gui.draw_string(dbg, 20, g_win_h - 135, 1.2f, 140, 140, 160, 255);
+                snprintf(dbg, sizeof(dbg), "Mouse: %d,%d  DT: %.4fs", mouse_x, mouse_y, dt_seconds);
+                g_gui.draw_string(dbg, 20, g_win_h - 152, 1.2f, 140, 140, 160, 255);
+                snprintf(dbg, sizeof(dbg), "F1:GUI  F3:Debug  F12:Fullscreen");
+                g_gui.draw_string(dbg, 20, g_win_h - 175, 1.1f, 100, 100, 120, 200);
+                glPopMatrix();
+                glMatrixMode(GL_PROJECTION);
+                glPopMatrix();
+                glPopAttrib();
+            }
+            
+            // Show "Press F1" hint for first 5 seconds
+            if (g_display_active && !gui_visible && (SDL_GetTicks() - hint_start_time) < 5000) {
+                glPushAttrib(GL_ALL_ATTRIB_BITS);
+                glViewport(0, 0, g_win_w, g_win_h);
+                glMatrixMode(GL_PROJECTION);
+                glPushMatrix();
+                glLoadIdentity();
+                glOrtho(0, g_win_w, 0, g_win_h, -1, 1);
                 glMatrixMode(GL_MODELVIEW);
+                glPushMatrix();
+                glLoadIdentity();
+                glDisable(GL_TEXTURE_2D);
+                glDisable(GL_LIGHTING);
+                glDisable(GL_DEPTH_TEST);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glColor4ub(0, 0, 0, 160);
+                int cx = g_win_w / 2;
+                int cy = g_win_h / 2;
+                glBegin(GL_QUADS);
+                glVertex2f(cx - 260, cy - 15); glVertex2f(cx + 260, cy - 15);
+                glVertex2f(cx + 260, cy + 15); glVertex2f(cx - 260, cy + 15);
+                glEnd();
+                g_gui.draw_string("Press F1 for GUI | F3 for Debug | F12 Fullscreen", cx - 250, cy - 7, 1.2f, 0, 200, 255, 255);
                 glPopMatrix();
                 glMatrixMode(GL_PROJECTION);
                 glPopMatrix();
@@ -427,23 +498,37 @@ void load_and_boot() {
                             if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
                                 running = false;
                             }
+                            if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                                g_win_w = event.window.data1;
+                                g_win_h = event.window.data2;
+                                std::cout << "[Display] Resized to " << g_win_w << "x" << g_win_h << std::endl;
+                            }
                             break;
                         case SDL_MOUSEBUTTONDOWN:
                             if (event.button.button == SDL_BUTTON_LEFT) {
                                 mouse_pressed = true;
-                                float x = event.button.x * 800.0f / 1920.0f;
-                                float y = 480.0f - (event.button.y * 480.0f / 1080.0f);
-                                last_mouse_x = x;
-                                last_mouse_y = y;
-                                // Primary touch click
-                                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 1, 1, 0.0, x, y, x, y, 1);
+                                mouse_x = event.button.x;
+                                mouse_y = g_win_h - event.button.y;
+                                if (gui_visible && g_gui.handle_click(mouse_x, mouse_y)) {
+                                    click_swallowed_by_gui = true;
+                                } else {
+                                    click_swallowed_by_gui = false;
+                                    // Scale mouse from window to 960x544 game coords
+                                    float x = event.button.x * 960.0f / (float)g_win_w;
+                                    float y = 544.0f - (event.button.y * 544.0f / (float)g_win_h);
+                                    last_mouse_x = x;
+                                    last_mouse_y = y;
+                                    call_handle_touch_event(handleTouchEvent, env_ptr, 0, 1, 1, accumulated_time, x, y, x, y, 1);
+                                }
                             }
                             break;
                         case SDL_MOUSEMOTION:
-                            if (mouse_pressed) {
-                                float x = event.motion.x * 800.0f / 1920.0f;
-                                float y = 480.0f - (event.motion.y * 480.0f / 1080.0f);
-                                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 1, 0.0, x, y, last_mouse_x, last_mouse_y, 0);
+                            mouse_x = event.motion.x;
+                            mouse_y = g_win_h - event.motion.y;
+                            if (mouse_pressed && !click_swallowed_by_gui) {
+                                float x = event.motion.x * 960.0f / (float)g_win_w;
+                                float y = 544.0f - (event.motion.y * 544.0f / (float)g_win_h);
+                                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 1, accumulated_time, x, y, last_mouse_x, last_mouse_y, 0);
                                 last_mouse_x = x;
                                 last_mouse_y = y;
                             }
@@ -451,17 +536,45 @@ void load_and_boot() {
                         case SDL_MOUSEBUTTONUP:
                             if (event.button.button == SDL_BUTTON_LEFT) {
                                 mouse_pressed = false;
-                                float x = event.button.x * 800.0f / 1920.0f;
-                                float y = 480.0f - (event.button.y * 480.0f / 1080.0f);
-                                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 2, 1, 0.0, x, y, last_mouse_x, last_mouse_y, 0);
-                                last_mouse_x = -1.0f;
-                                last_mouse_y = -1.0f;
+                                mouse_x = event.button.x;
+                                mouse_y = g_win_h - event.button.y;
+                                if (!click_swallowed_by_gui) {
+                                    float x = event.button.x * 960.0f / (float)g_win_w;
+                                    float y = 544.0f - (event.button.y * 544.0f / (float)g_win_h);
+                                    call_handle_touch_event(handleTouchEvent, env_ptr, 0, 2, 1, accumulated_time, x, y, last_mouse_x, last_mouse_y, 0);
+                                    last_mouse_x = -1.0f;
+                                    last_mouse_y = -1.0f;
+                                }
+                                click_swallowed_by_gui = false;
                             }
                             break;
                         case SDL_KEYDOWN:
                             if (event.key.keysym.sym == SDLK_F1 && !event.key.repeat) {
                                 gui_visible = !gui_visible;
-                                std::cout << "[GUI] Menu overlay " << (gui_visible ? "ON" : "OFF") << std::endl;
+                                std::cout << "[GUI] " << (gui_visible ? "ON" : "OFF") << std::endl;
+                                break;
+                            }
+                            if (event.key.keysym.sym == SDLK_F3 && !event.key.repeat) {
+                                debug_visible = !debug_visible;
+                                std::cout << "[Debug] " << (debug_visible ? "ON" : "OFF") << std::endl;
+                                break;
+                            }
+                            if (event.key.keysym.sym == SDLK_F12 && !event.key.repeat) {
+                                Uint32 flags = SDL_GetWindowFlags(g_display_ptr->get_window());
+                                if (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) {
+                                    SDL_SetWindowFullscreen(g_display_ptr->get_window(), 0);
+                                    g_win_w = 1920;
+                                    g_win_h = 1080;
+                                    std::cout << "[Display] Windowed 1920x1080" << std::endl;
+                                } else {
+                                    SDL_SetWindowFullscreen(g_display_ptr->get_window(), SDL_WINDOW_FULLSCREEN_DESKTOP);
+                                    // Get actual fullscreen resolution
+                                    int fw, fh;
+                                    SDL_GetWindowSize(g_display_ptr->get_window(), &fw, &fh);
+                                    g_win_w = fw;
+                                    g_win_h = fh;
+                                    std::cout << "[Display] Fullscreen " << fw << "x" << fh << std::endl;
+                                }
                                 break;
                             }
                             // fall through
@@ -472,16 +585,14 @@ void load_and_boot() {
                                 case SDLK_a:
                                     if (key_left != is_down) {
                                         key_left = is_down;
-                                        // Vita: (60, 94) @ 960x544 → scaled to 800x480: (50, 83)
-                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 6, 0.0, 50.0f, 83.0f, 50.0f, 83.0f, is_down ? 1 : 0);
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 6, accumulated_time, 60.0f, 94.0f, 60.0f, 94.0f, is_down ? 1 : 0);
                                     }
                                     break;
                                 case SDLK_RIGHT:
                                 case SDLK_d:
                                     if (key_right != is_down) {
                                         key_right = is_down;
-                                        // Vita: (155, 94) @ 960x544 → scaled to 800x480: (129, 83)
-                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 7, 0.0, 129.0f, 83.0f, 129.0f, 83.0f, is_down ? 1 : 0);
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 7, accumulated_time, 155.0f, 94.0f, 155.0f, 94.0f, is_down ? 1 : 0);
                                     }
                                     break;
                                 case SDLK_SPACE:
@@ -489,45 +600,74 @@ void load_and_boot() {
                                 case SDLK_w:
                                     if (key_jump != is_down) {
                                         key_jump = is_down;
-                                        // Vita: (900, 94) @ 960x544 → scaled: (750, 83)
-                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 5, 0.0, 750.0f, 83.0f, 750.0f, 83.0f, is_down ? 1 : 0);
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 5, accumulated_time, 900.0f, 94.0f, 900.0f, 94.0f, is_down ? 1 : 0);
                                     }
                                     break;
                                 case SDLK_j:
                                 case SDLK_z:
                                     if (key_attack != is_down) {
                                         key_attack = is_down;
-                                        // Vita: (790, 94) @ 960x544 → scaled: (658, 83)
-                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 8, 0.0, 658.0f, 83.0f, 658.0f, 83.0f, is_down ? 1 : 0);
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 8, accumulated_time, 790.0f, 94.0f, 790.0f, 94.0f, is_down ? 1 : 0);
                                     }
                                     break;
                                 case SDLK_k:
                                 case SDLK_x:
                                     if (key_magic != is_down) {
                                         key_magic = is_down;
-                                        // Vita: (900, 184) @ 960x544 → scaled: (750, 162)
-                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 10, 0.0, 750.0f, 162.0f, 750.0f, 162.0f, is_down ? 1 : 0);
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 10, accumulated_time, 900.0f, 184.0f, 900.0f, 184.0f, is_down ? 1 : 0);
                                     }
                                     break;
                                 case SDLK_i:
                                     if (key_use_item != is_down) {
                                         key_use_item = is_down;
-                                        // Vita: (425, 54) @ 960x544 → scaled: (354, 48)
-                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 12, 0.0, 354.0f, 48.0f, 354.0f, 48.0f, is_down ? 1 : 0);
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 12, accumulated_time, 425.0f, 54.0f, 425.0f, 54.0f, is_down ? 1 : 0);
                                     }
                                     break;
                                 case SDLK_ESCAPE:
                                     if (key_menu != is_down) {
                                         key_menu = is_down;
-                                        // Vita: (48, 500) @ 960x544 → scaled: (40, 441)
-                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 9, 0.0, 40.0f, 441.0f, 40.0f, 441.0f, is_down ? 1 : 0);
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 9, accumulated_time, 48.0f, 500.0f, 48.0f, 500.0f, is_down ? 1 : 0);
                                     }
                                     break;
                             }
                             break;
                         }
+                        // --- Multi-touch support (touchscreen laptops, up to 10 fingers) ---
+                        case SDL_FINGERDOWN: {
+                            // SDL finger coords are normalized 0.0-1.0, scale to game 960x544
+                            float x = event.tfinger.x * 960.0f;
+                            float y = (1.0f - event.tfinger.y) * 544.0f;  // flip Y
+                            int finger_id = (int)(event.tfinger.fingerId % 10) + 20;  // IDs 20-29 for touch
+                            call_handle_touch_event(handleTouchEvent, env_ptr, 0, 1, finger_id, accumulated_time, x, y, x, y, 1);
+                            break;
+                        }
+                        case SDL_FINGERUP: {
+                            float x = event.tfinger.x * 960.0f;
+                            float y = (1.0f - event.tfinger.y) * 544.0f;
+                            int finger_id = (int)(event.tfinger.fingerId % 10) + 20;
+                            call_handle_touch_event(handleTouchEvent, env_ptr, 0, 2, finger_id, accumulated_time, x, y, x, y, 0);
+                            break;
+                        }
+                        case SDL_FINGERMOTION: {
+                            float x = event.tfinger.x * 960.0f;
+                            float y = (1.0f - event.tfinger.y) * 544.0f;
+                            float old_x = (event.tfinger.x - event.tfinger.dx) * 960.0f;
+                            float old_y = (1.0f - (event.tfinger.y - event.tfinger.dy)) * 544.0f;
+                            int finger_id = (int)(event.tfinger.fingerId % 10) + 20;
+                            call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, finger_id, accumulated_time, x, y, old_x, old_y, 0);
+                            break;
+                        }
                     }
                 }
+            }
+            
+            // FPS counter
+            fps_frame_count++;
+            Uint32 fps_now = SDL_GetTicks();
+            if (fps_now - fps_last_time >= 1000) {
+                fps = fps_frame_count * 1000.0f / (fps_now - fps_last_time);
+                fps_frame_count = 0;
+                fps_last_time = fps_now;
             }
             
             completed_frames++;
@@ -595,16 +735,27 @@ int main(int argc, char* argv[]) {
         if (strcmp(argv[i], "--headless") == 0) headless = true;
     }
     
+    // Set up user-writable directory paths (XDG Base Directory standard)
+    std::string home_dir = getenv("HOME") ? getenv("HOME") : ".";
+    std::string xdg_data = getenv("XDG_DATA_HOME") ? getenv("XDG_DATA_HOME") : (home_dir + "/.local/share");
+    std::string base_dir = xdg_data + "/swordigo-desktop";
+    mkdir(xdg_data.c_str(), 0755);
+    mkdir(base_dir.c_str(), 0755);
+    
+    g_save_dir = base_dir + "/save";
+    g_cache_dir = base_dir + "/cache";
+    mkdir(g_save_dir.c_str(), 0755);
+    mkdir(g_cache_dir.c_str(), 0755);
+    std::cout << "[Main] Save directory: " << g_save_dir << std::endl;
+    std::cout << "[Main] Cache directory: " << g_cache_dir << std::endl;
+    
     Display display;
     
     if (!headless) {
-        if (display.init(1920, 1080, "Swordigo Desktop")) {
+        if (display.init(1920, 1080, "Swordigo Desktop - Remastered")) {
             g_display_active = true;
             g_display_ptr = &display;
-            std::cout << "[Main] Display initialized — 1920x1080 HD mode" << std::endl;
-            // Create save directory if it doesn't exist
-            mkdir("./save", 0755);
-            mkdir("./cache", 0755);
+            std::cout << "[Main] Display initialized - 1920x1080 HD" << std::endl;
         } else {
             std::cerr << "[Main] Display init failed, falling back to headless" << std::endl;
         }

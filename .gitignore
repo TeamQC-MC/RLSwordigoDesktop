@@ -7,9 +7,26 @@
 swordigo_boot
 swordigo_headless
 loader_test
+analyze_syms
+check_relocations
+find_bad_ptr
+verify_0x10000000
+poc_loader
 
 # Object files
 *.o
+*.so
+*.so.*
+!libswordigo.so
+!libswordigo64.so
+
+# Archives
+*.zip
+*.tar
+*.tar.*
+*.xz
+*.gz
+*.7z
 
 # Build outputs directory
 build/
@@ -23,6 +40,18 @@ out/
 # Caches, saves (runtime data, not source)
 cache/
 save/
+*.ppm
+*.wav
+*.pvr
+*.POD
+*.scene
+*.scl
+*.gdata
+*.gstate
+*.gopt
+*.proto
+*.fnt
+*.atlas
 
 # -------- PROPRIETARY GAME BINARY --------
 # Extracted from the original APK — DO NOT DISTRIBUTE
@@ -45,27 +74,20 @@ reference/**
 
 # -------- EXTRACTED GAME ASSETS --------
 # Commercial game assets extracted from the APK
-# (textures, audio, 3D models, scenes, fonts, game data)
-assets/resources/*.pvr
-assets/resources/*.POD
-assets/resources/*.tex.png
-assets/resources/*.png
-assets/resources/*.wav
-assets/resources/*.mp3
-assets/resources/*.ogg
-assets/resources/*.fnt
-assets/resources/*.scene
-assets/resources/*.atlas
-assets/resources/*.scl
-assets/resources/*.gdata
-assets/resources/*.gstate
-assets/resources/*.gopt
-assets/resources/*.proto
-assets/resources/gamedata.txt
-assets/resources/docs/
+assets/resources/
+assets/dexopt/
+dexopt/
 
 # Keep the README which has license attributions
 !assets/README
+
+# -------- BUILDER ARTIFACTS --------
+builder/appimage/Swordigo.AppDir/
+builder/appimage/Swordigo-x86_64.AppImage
+builder/appimage/appimagetool
+builder/flatpak/.flatpak-builder/
+builder/flatpak/repo/
+builder/flatpak/export/
 
 # -------- INTERNAL AGENT PROMPTS --------
 prompt/

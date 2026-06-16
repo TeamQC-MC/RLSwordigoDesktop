@@ -14,6 +14,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <cerrno>
 #define GL_GLEXT_PROTOTYPES
 #include <GL/gl.h>
 #include <GL/glext.h>
@@ -22,6 +23,7 @@
 
 // When true, GL bridge functions call real OpenGL instead of no-ops
 bool g_display_active = false;
+std::string g_save_dir = "./save";  // Default; overwritten by main.cpp at startup
 
 
 // --- Frame Statistics ---
@@ -930,7 +932,9 @@ void bridge_CallBooleanMethodV(void* emu_ptr) {
         res = 0; // return 0 like Vita port
     }
     
-    std::cout << "[JNI] CallBooleanMethodV(mid=0x" << std::hex << method_id << ") -> " << res << std::dec << std::endl;
+    if (!emu->quiet_mode) {
+        std::cout << "[JNI] CallBooleanMethodV(mid=0x" << std::hex << method_id << ") -> " << res << std::dec << std::endl;
+    }
     emu->set_reg(0, res);
 }
 
@@ -944,7 +948,9 @@ void bridge_CallIntMethodV(void* emu_ptr) {
     } else {
         res = 0;
     }
-    std::cout << "[JNI] CallIntMethodV(mid=0x" << std::hex << method_id << ") -> " << res << std::dec << std::endl;
+    if (!emu->quiet_mode) {
+        std::cout << "[JNI] CallIntMethodV(mid=0x" << std::hex << method_id << ") -> " << res << std::dec << std::endl;
+    }
     emu->set_reg(0, res);
 }
 
@@ -961,36 +967,42 @@ void bridge_CallVoidMethodV(void* emu_ptr) {
     uint32_t method_id = emu->get_reg(2);
     uint32_t va_list_ptr = emu->get_reg(3);
     
-    std::cout << "[JNI] CallVoidMethodV(mid=0x" << std::hex << method_id << ")" << std::dec << std::endl;
-    
     if (method_id == 0x13200001) { // play
-        std::cout << "[JNI] MusicPlayer.play()" << std::endl;
+        std::cout << "[Music] play()" << std::endl;
         if (g_music_source != 0) {
             alSourcePlay(g_music_source);
         }
     } else if (method_id == 0x13210001) { // pause
-        std::cout << "[JNI] MusicPlayer.pause()" << std::endl;
+        std::cout << "[Music] pause()" << std::endl;
         if (g_music_source != 0) {
             alSourcePause(g_music_source);
         }
     } else if (method_id == 0x13220001) { // stop
-        std::cout << "[JNI] MusicPlayer.stop()" << std::endl;
+        std::cout << "[Music] stop()" << std::endl;
         if (g_music_source != 0) {
             alSourceStop(g_music_source);
         }
     } else if (method_id == 0x13230001) { // setLooping
         uint32_t looping = *(uint32_t*)(memory + va_list_ptr);
         g_music_looping = (looping != 0);
-        std::cout << "[JNI] MusicPlayer.setLooping(" << g_music_looping << ")" << std::endl;
         if (g_music_source != 0) {
             alSourcei(g_music_source, AL_LOOPING, g_music_looping ? AL_TRUE : AL_FALSE);
         }
     } else if (method_id == 0x13240001) { // setVolume
-        // In ARM EABI, double inside va_list is 8-byte aligned.
-        // Reading it as double since float arguments are promoted to double in va_list.
-        double vol_d = *(double*)(memory + va_list_ptr);
+        // ARM EABI: double in va_list must be 8-byte aligned
+        // Align va_list_ptr up to next 8-byte boundary for the double
+        uint32_t aligned_ptr = (va_list_ptr + 7) & ~7u;
+        double vol_d;
+        memcpy(&vol_d, memory + aligned_ptr, sizeof(double));
         g_music_volume = (float)vol_d;
-        std::cout << "[JNI] MusicPlayer.setVolume(" << g_music_volume << ")" << std::endl;
+        
+        // Clamp: prevent total silence (game uses vol=0 during transitions)
+        if (g_music_volume < 0.05f && g_music_volume >= 0.0f) {
+            g_music_volume = 0.05f;
+        }
+        if (g_music_volume > 1.0f) g_music_volume = 1.0f;
+        
+        std::cout << "[Music] setVolume(" << g_music_volume << ") raw_double=" << vol_d << std::endl;
         if (g_music_source != 0) {
             alSourcef(g_music_source, AL_GAIN, g_music_volume);
         }
@@ -1111,11 +1123,12 @@ void bridge_CallStaticVoidMethodV(void* emu_ptr) {
     } else if (mid == 0x13170007) { // receivedPrivacyConsent
         std::cout << "[JNI] receivedPrivacyConsent() -> Stubbed!" << std::endl;
     } else if (mid == 0x13250001) { // loadSnapshot
-        std::cout << "[SAVE] loadSnapshot() -> Reading ./save/snapshot.bin" << std::endl;
+        std::string snap_path = g_save_dir + "/snapshot.bin";
+        std::cout << "[SAVE] loadSnapshot() -> Reading " << snap_path << std::endl;
         g_snapshot_load_pending = true;
         g_snapshot_has_data = false;
         // Try to read save data from disk
-        FILE* sf = fopen("./save/snapshot.bin", "rb");
+        FILE* sf = fopen(snap_path.c_str(), "rb");
         if (sf) {
             fseek(sf, 0, SEEK_END);
             long sz = ftell(sf);
@@ -1147,17 +1160,18 @@ void bridge_CallStaticVoidMethodV(void* emu_ptr) {
             
             // Sanity check
             if (array_len > 0 && array_len < 0x1000000) {
-                FILE* sf = fopen("./save/snapshot.bin", "wb");
+                FILE* sf = fopen((g_save_dir + "/snapshot.bin").c_str(), "wb");
                 if (sf) {
                     fwrite(array_data, 1, array_len, sf);
+                    fflush(sf);
                     fclose(sf);
-                    std::cout << "[SAVE] Wrote " << array_len << " bytes to snapshot.bin" << std::endl;
+                    std::cout << "[SAVE] Wrote " << array_len << " bytes to " << g_save_dir << "/snapshot.bin" << std::endl;
                 }
             }
         }
     } else if (mid == 0x13250003) { // deleteSnapshot
-        remove("./save/snapshot.bin");
-        std::cout << "[SAVE] Deleted snapshot.bin" << std::endl;
+        remove((g_save_dir + "/snapshot.bin").c_str());
+        std::cout << "[SAVE] Deleted snapshot" << std::endl;
     } else if (mid == 0x13270001) { // startAdsAndAnalytics
         std::cout << "[JNI] startAdsAndAnalytics() -> Stubbed!" << std::endl;
     }
@@ -1533,9 +1547,23 @@ void bridge_fclose(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     uint32_t handle = emu->get_reg(0);
     if (g_file_handles.count(handle)) {
+        fflush(g_file_handles[handle]);  // Ensure data written to disk before close
         fclose(g_file_handles[handle]);
         g_file_handles.erase(handle);
         emu->set_reg(0, 0);
+    } else {
+        emu->set_reg(0, -1);
+    }
+}
+
+void bridge_fflush(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t handle = emu->get_reg(0);
+    if (handle == 0) {
+        fflush(NULL); // flush all streams
+        emu->set_reg(0, 0);
+    } else if (g_file_handles.count(handle)) {
+        emu->set_reg(0, fflush(g_file_handles[handle]));
     } else {
         emu->set_reg(0, -1);
     }
@@ -1602,6 +1630,48 @@ void bridge_mkdir(void* emu_ptr) {
     const char* path = (const char*)(memory + path_ptr);
     std::cout << "[File] mkdir(\"" << path << "\", " << std::oct << mode << std::dec << ")" << std::endl;
     int result = mkdir(path, (mode_t)mode);
+    emu->set_reg(0, (uint32_t)result);
+}
+
+void bridge_rename(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    const char* old_path = (const char*)(memory + emu->get_reg(0));
+    const char* new_path = (const char*)(memory + emu->get_reg(1));
+    int result = rename(old_path, new_path);
+    if (result != 0) {
+        std::cerr << "[File] rename(\"" << old_path << "\" -> \"" << new_path << "\") FAILED: " << strerror(errno) << std::endl;
+    } else {
+        std::cout << "[File] rename(\"" << old_path << "\" -> \"" << new_path << "\") OK" << std::endl;
+    }
+    emu->set_reg(0, (uint32_t)result);
+}
+
+void bridge_remove(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    const char* path = (const char*)(memory + emu->get_reg(0));
+    int result = remove(path);
+    if (result != 0 && errno != ENOENT) {
+        std::cerr << "[File] remove(\"" << path << "\") FAILED: " << strerror(errno) << std::endl;
+    }
+    emu->set_reg(0, (uint32_t)result);
+}
+
+void bridge_access(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    const char* path = (const char*)(memory + emu->get_reg(0));
+    int mode = (int)emu->get_reg(1);
+    int result = access(path, mode);
+    emu->set_reg(0, (uint32_t)result);
+}
+
+void bridge_unlink(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    const char* path = (const char*)(memory + emu->get_reg(0));
+    int result = unlink(path);
     emu->set_reg(0, (uint32_t)result);
 }
 
@@ -2128,6 +2198,187 @@ void bridge_gl_noop(void* emu_ptr) {
     g_frame_stats.state_changes++;
 }
 
+// --- Fog (water color, atmosphere, depth haze) ---
+void bridge_glFogf(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    GLenum pname = (GLenum)emu->get_reg(0);
+    uint32_t param_bits = emu->get_reg(1);
+    float param;
+    memcpy(&param, &param_bits, 4);
+    if (g_display_active) glFogf(pname, param);
+}
+
+void bridge_glFogfv(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    GLenum pname = (GLenum)emu->get_reg(0);
+    uint32_t params_ptr = emu->get_reg(1);
+    if (g_display_active && params_ptr != 0) {
+        float params[4];
+        memcpy(params, memory + params_ptr, 16);
+        glFogfv(pname, params);
+    }
+}
+
+void bridge_glFogi(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    GLenum pname = (GLenum)emu->get_reg(0);
+    GLint param = (GLint)emu->get_reg(1);
+    if (g_display_active) glFogi(pname, param);
+}
+
+// --- Lighting ---
+void bridge_glLightf(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    GLenum light = (GLenum)emu->get_reg(0);
+    GLenum pname = (GLenum)emu->get_reg(1);
+    uint32_t param_bits = emu->get_reg(2);
+    float param;
+    memcpy(&param, &param_bits, 4);
+    if (g_display_active) glLightf(light, pname, param);
+}
+
+void bridge_glLightfv(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    GLenum light = (GLenum)emu->get_reg(0);
+    GLenum pname = (GLenum)emu->get_reg(1);
+    uint32_t params_ptr = emu->get_reg(2);
+    if (g_display_active && params_ptr != 0) {
+        float params[4];
+        memcpy(params, memory + params_ptr, 16);
+        glLightfv(light, pname, params);
+    }
+}
+
+void bridge_glLightModelf(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    GLenum pname = (GLenum)emu->get_reg(0);
+    uint32_t param_bits = emu->get_reg(1);
+    float param;
+    memcpy(&param, &param_bits, 4);
+    if (g_display_active) glLightModelf(pname, param);
+}
+
+void bridge_glLightModelfv(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    GLenum pname = (GLenum)emu->get_reg(0);
+    uint32_t params_ptr = emu->get_reg(1);
+    if (g_display_active && params_ptr != 0) {
+        float params[4];
+        memcpy(params, memory + params_ptr, 16);
+        glLightModelfv(pname, params);
+    }
+}
+
+// --- Materials ---
+void bridge_glMaterialf(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    GLenum face = (GLenum)emu->get_reg(0);
+    GLenum pname = (GLenum)emu->get_reg(1);
+    uint32_t param_bits = emu->get_reg(2);
+    float param;
+    memcpy(&param, &param_bits, 4);
+    if (g_display_active) glMaterialf(face, pname, param);
+}
+
+void bridge_glMaterialfv(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    GLenum face = (GLenum)emu->get_reg(0);
+    GLenum pname = (GLenum)emu->get_reg(1);
+    uint32_t params_ptr = emu->get_reg(2);
+    if (g_display_active && params_ptr != 0) {
+        float params[4];
+        memcpy(params, memory + params_ptr, 16);
+        glMaterialfv(face, pname, params);
+    }
+}
+
+// --- Vertex Color ---
+void bridge_glColor4ub(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    GLubyte r = (GLubyte)emu->get_reg(0);
+    GLubyte g = (GLubyte)emu->get_reg(1);
+    GLubyte b = (GLubyte)emu->get_reg(2);
+    GLubyte a = (GLubyte)emu->get_reg(3);
+    if (g_display_active) glColor4ub(r, g, b, a);
+}
+
+// --- Texture Environment ---
+void bridge_glTexEnvi(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    GLenum target = (GLenum)emu->get_reg(0);
+    GLenum pname = (GLenum)emu->get_reg(1);
+    GLint param = (GLint)emu->get_reg(2);
+    if (g_display_active) glTexEnvi(target, pname, param);
+}
+
+void bridge_glTexEnvfv(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    GLenum target = (GLenum)emu->get_reg(0);
+    GLenum pname = (GLenum)emu->get_reg(1);
+    uint32_t params_ptr = emu->get_reg(2);
+    if (g_display_active && params_ptr != 0) {
+        float params[4];
+        memcpy(params, memory + params_ptr, 16);
+        glTexEnvfv(target, pname, params);
+    }
+}
+
+// --- Misc rendering ---
+void bridge_glCullFace(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    GLenum mode = (GLenum)emu->get_reg(0);
+    if (g_display_active) glCullFace(mode);
+}
+
+void bridge_glHint(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    GLenum target = (GLenum)emu->get_reg(0);
+    GLenum mode = (GLenum)emu->get_reg(1);
+    if (g_display_active) glHint(target, mode);
+}
+
+void bridge_glPointSize(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t size_bits = emu->get_reg(0);
+    float size;
+    memcpy(&size, &size_bits, 4);
+    if (g_display_active) glPointSize(size);
+}
+
+// --- Stencil (needed for shadows/water reflections) ---
+void bridge_glStencilFunc(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    GLenum func = (GLenum)emu->get_reg(0);
+    GLint ref = (GLint)emu->get_reg(1);
+    GLuint mask = (GLuint)emu->get_reg(2);
+    if (g_display_active) glStencilFunc(func, ref, mask);
+}
+
+void bridge_glStencilMask(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    GLuint mask = (GLuint)emu->get_reg(0);
+    if (g_display_active) glStencilMask(mask);
+}
+
+void bridge_glStencilOp(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    GLenum sfail = (GLenum)emu->get_reg(0);
+    GLenum dpfail = (GLenum)emu->get_reg(1);
+    GLenum dppass = (GLenum)emu->get_reg(2);
+    if (g_display_active) glStencilOp(sfail, dpfail, dppass);
+}
+
+void bridge_glClearStencil(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    GLint s = (GLint)emu->get_reg(0);
+    if (g_display_active) glClearStencil(s);
+}
+
 
 // --- Phase 1: Clear/Viewport ---
 
@@ -2156,11 +2407,12 @@ void bridge_gl_clear_color(void* emu_ptr) {
     }
 }
 
-// Global resolution scaling (game renders at GAME_W x GAME_H, window is WIN_W x WIN_H)
-static int g_win_w = 1920;
-static int g_win_h = 1080;
-static const int GAME_W = 800;
-static const int GAME_H = 480;
+// Global resolution scaling (game renders at GAME_W x GAME_H, window is g_win_w x g_win_h)
+// g_win_w/g_win_h are updated by main.cpp when window resizes or goes fullscreen
+int g_win_w = 1920;
+int g_win_h = 1080;
+static const int GAME_W = 960;
+static const int GAME_H = 544;
 
 void bridge_gl_viewport(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
@@ -3356,6 +3608,7 @@ void JniBridge::init_standard_bridges() {
     register_handler("fwrite", bridge_fwrite);
     register_handler("fseek", bridge_fseek);
     register_handler("ftell", bridge_ftell);
+    register_handler("fflush", bridge_fflush);
     register_handler("lseek", bridge_lseek);
     register_handler("gzdopen", bridge_gzdopen);
     register_handler("gzread", bridge_gzread);
@@ -3367,6 +3620,10 @@ void JniBridge::init_standard_bridges() {
     register_handler("opendir", bridge_opendir);
     register_handler("readdir", bridge_readdir);
     register_handler("closedir", bridge_closedir);
+    register_handler("rename", bridge_rename);
+    register_handler("remove", bridge_remove);
+    register_handler("access", bridge_access);
+    register_handler("unlink", bridge_unlink);
     register_handler("C_Matrix4Mul", bridge_matrix4_mul);
     register_handler("_Z12C_Matrix4MulPKfS0_Pf", bridge_matrix4_mul);
 
@@ -3536,9 +3793,9 @@ void JniBridge::init_standard_bridges() {
     register_handler("glLineWidth", bridge_gl_line_width);
     register_handler("glScissor", bridge_gl_scissor);
     register_handler("glColorMask", bridge_gl_color_mask);
-    register_handler("glStencilFunc", bridge_gl_noop);
-    register_handler("glStencilMask", bridge_gl_noop);
-    register_handler("glStencilOp", bridge_gl_noop);
+    register_handler("glStencilFunc", bridge_glStencilFunc);
+    register_handler("glStencilMask", bridge_glStencilMask);
+    register_handler("glStencilOp", bridge_glStencilOp);
     register_handler("glActiveTexture", bridge_gl_active_texture);
     register_handler("glClientActiveTexture", bridge_gl_active_texture);
     register_handler("glPixelStorei", bridge_gl_pixel_storei);
@@ -3563,25 +3820,25 @@ void JniBridge::init_standard_bridges() {
     register_handler("glGetString", bridge_glGetString);
     register_handler("glAlphaFunc", bridge_gl_alpha_func);
     register_handler("glShadeModel", bridge_gl_shade_model);
-    register_handler("glFogf", bridge_gl_noop);
-    register_handler("glFogfv", bridge_gl_noop);
-    register_handler("glFogi", bridge_gl_noop);
-    register_handler("glMaterialf", bridge_gl_noop);
-    register_handler("glMaterialfv", bridge_gl_noop);
-    register_handler("glLightf", bridge_gl_noop);
-    register_handler("glLightfv", bridge_gl_noop);
-    register_handler("glLightModelf", bridge_gl_noop);
-    register_handler("glLightModelfv", bridge_gl_noop);
-    register_handler("glPointSize", bridge_gl_noop);
-    register_handler("glCullFace", bridge_gl_noop);
-    register_handler("glHint", bridge_gl_noop);
+    register_handler("glFogf", bridge_glFogf);
+    register_handler("glFogfv", bridge_glFogfv);
+    register_handler("glFogi", bridge_glFogi);
+    register_handler("glMaterialf", bridge_glMaterialf);
+    register_handler("glMaterialfv", bridge_glMaterialfv);
+    register_handler("glLightf", bridge_glLightf);
+    register_handler("glLightfv", bridge_glLightfv);
+    register_handler("glLightModelf", bridge_glLightModelf);
+    register_handler("glLightModelfv", bridge_glLightModelfv);
+    register_handler("glPointSize", bridge_glPointSize);
+    register_handler("glCullFace", bridge_glCullFace);
+    register_handler("glHint", bridge_glHint);
     register_handler("glFlush", bridge_gl_flush);
     register_handler("glFinish", bridge_gl_finish);
     register_handler("glReadPixels", bridge_gl_noop);
-    register_handler("glClearStencil", bridge_gl_noop);
-    register_handler("glColor4ub", bridge_gl_noop);
-    register_handler("glTexEnvi", bridge_gl_noop);
-    register_handler("glTexEnvfv", bridge_gl_noop);
+    register_handler("glClearStencil", bridge_glClearStencil);
+    register_handler("glColor4ub", bridge_glColor4ub);
+    register_handler("glTexEnvi", bridge_glTexEnvi);
+    register_handler("glTexEnvfv", bridge_glTexEnvfv);
     register_handler("glTexParameterf", bridge_gl_tex_parameterf);
 
     // EGL
