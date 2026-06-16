@@ -668,19 +668,21 @@ void load_and_boot() {
                                     }
                                     break;
 
-                                // ---- Camera override keys (Numpad) ----
-                                case SDLK_KP_4:    cam_key_left  = is_down; break;
-                                case SDLK_KP_6:    cam_key_right = is_down; break;
-                                case SDLK_KP_8:    cam_key_fwd   = is_down; break;
-                                case SDLK_KP_2:    cam_key_back  = is_down; break;
-                                case SDLK_KP_7:
-                                case SDLK_PAGEUP:   cam_key_up   = is_down; break;
-                                case SDLK_KP_1:
-                                case SDLK_PAGEDOWN: cam_key_down = is_down; break;
-                                case SDLK_KP_PLUS:  cam_key_zin  = is_down; break;
-                                case SDLK_KP_MINUS: cam_key_zout = is_down; break;
-                                case SDLK_KP_5:  // Reset camera position
-                                case SDLK_HOME:
+                                // ---- Camera override keys (no numpad required) ----
+                                //   Pan  L/R  : [ and ]
+                                //   Depth F/B : , and .
+                                //   Height    : PageUp / PageDown
+                                //   Zoom      : - and =
+                                //   Reset     : backslash  (\)
+                                case SDLK_LEFTBRACKET:   cam_key_left  = is_down; break;
+                                case SDLK_RIGHTBRACKET:  cam_key_right = is_down; break;
+                                case SDLK_COMMA:         cam_key_fwd   = is_down; break;
+                                case SDLK_PERIOD:        cam_key_back  = is_down; break;
+                                case SDLK_PAGEUP:        cam_key_up    = is_down; break;
+                                case SDLK_PAGEDOWN:      cam_key_down  = is_down; break;
+                                case SDLK_EQUALS:        cam_key_zin   = is_down; break;
+                                case SDLK_MINUS:         cam_key_zout  = is_down; break;
+                                case SDLK_BACKSLASH:  // Reset camera
                                     if (is_down) cam_reset();
                                     break;
                             }

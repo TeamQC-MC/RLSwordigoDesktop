@@ -1,5 +1,5 @@
 #include "camera_override.h"
-#include <cstdio>
+#include "../platform/emulator.h"
 #include <cstring>
 #include <cmath>
 #include <iostream>

@@ -1,8 +1,11 @@
 #include "emulator.h"
-#include "../game/camera_override.h"
 #include <iostream>
 #include <cstring>
 #include <unicorn/unicorn.h>
+
+// Forward declarations from game/camera_override.cpp
+extern uint32_t g_cam_ctrl_ptr;
+extern void cam_capture_controller(uint32_t this_ptr);
 
 static uint32_t g_instruction_count = 0;
 

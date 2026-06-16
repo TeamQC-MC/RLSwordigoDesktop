@@ -1,7 +1,9 @@
 #pragma once
 #include <cstdint>
 #include <cstring>
-#include "platform/emulator.h"
+
+// Forward declaration — full definition in camera_override.cpp
+class Emulator;
 
 // ============================================================
 //  SwordigoDesktop — Camera Override System
