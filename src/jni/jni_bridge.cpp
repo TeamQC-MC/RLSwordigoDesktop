@@ -614,6 +614,13 @@ void bridge_GetMethodID(void* emu_ptr) {
     else if (strcmp(name, "deleteSnapshot") == 0) id = 0x13250003;
     else if (strcmp(name, "isGoogleGameServicesAvailable") == 0) id = 0x13260001;
     else if (strcmp(name, "startAdsAndAnalytics") == 0) id = 0x13270001;
+    // SharedPreferences bridge
+    else if (strcmp(name, "getBooleanFromSP") == 0) id = 0x13280001;
+    else if (strcmp(name, "saveBooleanInSP") == 0) id = 0x13280002;
+    else if (strcmp(name, "getIntFromSP") == 0) id = 0x13280003;
+    else if (strcmp(name, "saveIntInSP") == 0) id = 0x13280004;
+    else if (strcmp(name, "getLongFromSP") == 0) id = 0x13280005;
+    else if (strcmp(name, "saveLongInSP") == 0) id = 0x13280006;
     else if (strcmp(name, "<init>") == 0) id = 0x13000001;
     else id = 0x56780001;
     if (!emu->quiet_mode) {
@@ -820,6 +827,77 @@ static ALuint g_music_source = 0;
 static ALuint g_music_buffer = 0;
 
 static int g_saved_age = 25; // Pre-set age to bypass age gate entirely
+
+// ---------------------------------------------------------------
+// SharedPreferences — persistent key-value store backed by prefs.ini
+// Mirrors Android SharedPreferences used by the native engine for:
+//   knownAge, privacyConsent, explicitConsent, foreground timing, etc.
+// ---------------------------------------------------------------
+static std::unordered_map<std::string, std::string> g_prefs;
+static bool g_prefs_loaded = false;
+
+static void prefs_load() {
+    if (g_prefs_loaded) return;
+    g_prefs_loaded = true;
+    // Sensible defaults — ensures consent/age gate never blocks gameplay
+    g_prefs["knownAge"]             = "25";
+    g_prefs["privacyConsent"]       = "true";
+    g_prefs["explicitConsent"]      = "true";
+    g_prefs["ageConsent"]           = "true";
+    g_prefs["totalForegroundTime"]  = "999999";
+    g_prefs["foregroundTimeForReviewFlow"] = "0";
+    g_prefs["delayToReviewFlow"]    = "999999";
+    // Load overrides from disk
+    std::string path = g_save_dir + "/prefs.ini";
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        std::string s(line);
+        auto eq = s.find('=');
+        if (eq == std::string::npos) continue;
+        std::string k = s.substr(0, eq);
+        std::string v = s.substr(eq + 1);
+        if (!v.empty() && v.back() == '\n') v.pop_back();
+        g_prefs[k] = v;
+    }
+    fclose(f);
+    std::cout << "[Prefs] Loaded " << g_prefs.size() << " preferences from " << path << std::endl;
+}
+
+static void prefs_save() {
+    std::string path = g_save_dir + "/prefs.ini";
+    FILE* f = fopen(path.c_str(), "w");
+    if (!f) { std::cerr << "[Prefs] Cannot write " << path << std::endl; return; }
+    for (auto& kv : g_prefs) {
+        fprintf(f, "%s=%s\n", kv.first.c_str(), kv.second.c_str());
+    }
+    fclose(f);
+}
+
+static std::string pref_get(const std::string& key, const std::string& def = "0") {
+    prefs_load();
+    auto it = g_prefs.find(key);
+    return (it != g_prefs.end()) ? it->second : def;
+}
+
+static void pref_set(const std::string& key, const std::string& val) {
+    prefs_load();
+    g_prefs[key] = val;
+    prefs_save();
+    std::cout << "[Prefs] Set " << key << " = " << val << std::endl;
+}
+
+// Resolve a jstring handle (from g_jstrings map) or a raw guest C-string pointer
+static std::unordered_map<uint32_t, std::string> g_jstrings; // forward — defined below
+static std::string resolve_jstring(uint32_t handle, uint8_t* memory) {
+    auto it = g_jstrings.find(handle);
+    if (it != g_jstrings.end()) return it->second;
+    // Fallback: treat as direct C-string pointer in guest memory
+    if (handle > 0x1000 && handle < 0x40000000)
+        return std::string((const char*)(memory + handle));
+    return "";
+}
 bool g_snapshot_load_pending = false;
 std::vector<uint8_t> g_snapshot_data; // Loaded save data to pass back via snapshotLoaded
 bool g_snapshot_has_data = false; // Whether we have save data to return
@@ -1063,9 +1141,18 @@ void bridge_CallStaticBooleanMethodV(void* emu_ptr) {
     } else if (mid == 0x13170005) { // isExplicitPrivacyConsent
         res = 1; // Always return true
     } else if (mid == 0x13180001) { // getPlatformConsentState
-        res = 3; // Return 3 — OBTAINED (consent already obtained by platform)
+        res = 3; // Return 3 — OBTAINED
     } else if (mid == 0x13260001) { // isGoogleGameServicesAvailable
-        res = 0; // Return false
+        res = 0; // No Google Play Services on desktop
+    } else if (mid == 0x13280001) { // getBooleanFromSP(String key)
+        uint8_t* memory = emu->get_memory_base();
+        uint32_t va_ptr = emu->get_reg(3);
+        uint32_t key_h  = *(uint32_t*)(memory + va_ptr);
+        std::string key = resolve_jstring(key_h, memory);
+        std::string val = pref_get(key, "false");
+        res = (val == "true" || val == "1") ? 1 : 0;
+        if (!emu->quiet_mode)
+            std::cout << "[Prefs] getBooleanFromSP(" << key << ") -> " << res << std::endl;
     } else {
         res = 0;
     }
@@ -1081,6 +1168,17 @@ void bridge_CallStaticIntMethodV(void* emu_ptr) {
     int res = 0;
     if (mid == 0x13180001) { // getPlatformConsentState — return 3 (OBTAINED)
         res = 3;
+    } else if (mid == 0x13280003) { // getIntFromSP(String key)
+        uint8_t* memory = emu->get_memory_base();
+        uint32_t va_ptr = emu->get_reg(3);
+        uint32_t key_h  = *(uint32_t*)(memory + va_ptr);
+        std::string key = resolve_jstring(key_h, memory);
+        std::string val = pref_get(key, "0");
+        try { res = std::stoi(val); } catch (...) { res = 0; }
+        if (!emu->quiet_mode)
+            std::cout << "[Prefs] getIntFromSP(" << key << ") -> " << res << std::endl;
+    } else if (mid == 0x13170002) { // enteredAge — forward to getIntFromSP("knownAge")
+        res = std::stoi(pref_get("knownAge", "25"));
     }
     if (!emu->quiet_mode) {
         std::cout << "[JNI] CallStaticIntMethodV(mid=0x" << std::hex << mid << ") -> " << std::dec << res << std::endl;
@@ -1174,6 +1272,30 @@ void bridge_CallStaticVoidMethodV(void* emu_ptr) {
         std::cout << "[SAVE] Deleted snapshot" << std::endl;
     } else if (mid == 0x13270001) { // startAdsAndAnalytics
         std::cout << "[JNI] startAdsAndAnalytics() -> Stubbed!" << std::endl;
+    } else if (mid == 0x13280002) { // saveBooleanInSP(String key, boolean val)
+        uint8_t* memory = emu->get_memory_base();
+        uint32_t va_ptr = emu->get_reg(3);
+        uint32_t key_h  = *(uint32_t*)(memory + va_ptr);
+        uint32_t bval   = *(uint32_t*)(memory + va_ptr + 4);
+        std::string key = resolve_jstring(key_h, memory);
+        pref_set(key, bval ? "true" : "false");
+    } else if (mid == 0x13280004) { // saveIntInSP(String key, int val)
+        uint8_t* memory = emu->get_memory_base();
+        uint32_t va_ptr = emu->get_reg(3);
+        uint32_t key_h  = *(uint32_t*)(memory + va_ptr);
+        int ival        = *(int*)(memory + va_ptr + 4);
+        std::string key = resolve_jstring(key_h, memory);
+        pref_set(key, std::to_string(ival));
+    } else if (mid == 0x13280006) { // saveLongInSP(String key, long val)
+        uint8_t* memory = emu->get_memory_base();
+        uint32_t va_ptr = emu->get_reg(3);
+        uint32_t key_h  = *(uint32_t*)(memory + va_ptr);
+        // Long in ARM soft-float va_list: low word then high word
+        uint32_t lo = *(uint32_t*)(memory + va_ptr + 4);
+        uint32_t hi = *(uint32_t*)(memory + va_ptr + 8);
+        int64_t lval = (int64_t)((uint64_t)hi << 32 | lo);
+        std::string key = resolve_jstring(key_h, memory);
+        pref_set(key, std::to_string(lval));
     }
 }
 

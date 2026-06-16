@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Changelog — Swordigo Desktop v1 Beta</title>
+  <meta name="description" content="Full changelog and release notes for Swordigo Desktop v1 Beta — the first public Linux release.">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📝</text></svg>">
+  <style>
+    .release-block {
+      background: var(--grad-card);
+      border: 1px solid var(--clr-border);
+      border-radius: var(--radius-xl);
+      padding: var(--space-xl);
+      margin-bottom: var(--space-xl);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .release-block::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: var(--grad-hero);
+    }
+
+    .release-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: var(--space-md);
+      margin-bottom: var(--space-lg);
+      flex-wrap: wrap;
+    }
+
+    .release-version {
+      font-family: var(--font-display);
+      font-size: 2rem;
+      font-weight: 900;
+      background: var(--grad-text);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .release-date {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--clr-text-dim);
+      margin-top: 4px;
+    }
+
+    .release-section {
+      margin-bottom: var(--space-lg);
+    }
+
+    .release-section h3 {
+      font-family: var(--font-display);
+      font-size: 0.95rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-bottom: var(--space-sm);
+      padding-bottom: 6px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .release-section h3.working { color: var(--clr-green); }
+    .release-section h3.technical { color: var(--clr-blue-lt); }
+    .release-section h3.known-issues { color: var(--clr-gold); }
+    .release-section h3.notes { color: var(--clr-purple-lt); }
+
+    .milestone-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: var(--space-md);
+    }
+
+    .milestone-card {
+      background: rgba(0,0,0,0.25);
+      border: 1px solid var(--clr-border);
+      border-radius: var(--radius-md);
+      padding: var(--space-md);
+      transition: all 0.25s;
+    }
+
+    .milestone-card:hover {
+      border-color: rgba(139,61,255,0.35);
+      background: rgba(139,61,255,0.05);
+    }
+
+    .milestone-card .date {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      color: var(--clr-text-dim);
+      margin-bottom: 4px;
+    }
+
+    .milestone-card h4 {
+      font-family: var(--font-display);
+      font-size: 0.95rem;
+      margin-bottom: 4px;
+      color: var(--clr-text);
+    }
+
+    .milestone-card p {
+      font-size: 0.82rem;
+      color: var(--clr-text-muted);
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+<canvas id="stars-canvas"></canvas>
+
+<nav class="navbar" id="navbar">
+  <div class="container">
+    <div class="navbar__inner">
+      <a href="index.html" class="navbar__logo">
+        <span class="navbar__logo-icon">⚔️</span>
+        <div class="navbar__logo-text"><span>Swordigo</span> Desktop</div>
+      </a>
+      <ul class="navbar__nav" id="main-nav">
+        <li><a href="index.html">Home</a></li>
+        <li><a href="download.html">Download</a></li>
+        <li><a href="technical.html">Technical</a></li>
+        <li><a href="research.html">Research</a></li>
+        <li><a href="changelog.html">Changelog</a></li>
+      </ul>
+      <div class="navbar__cta" id="nav-cta">
+        <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener" class="btn btn--secondary btn--sm">GitHub</a>
+        <a href="download.html" class="btn btn--primary btn--sm">⬇ Download</a>
+      </div>
+      <button class="hamburger" id="hamburger" aria-label="Toggle menu"><span></span><span></span><span></span></button>
+    </div>
+  </div>
+</nav>
+
+<div class="page-header">
+  <div class="container">
+    <span class="section-label">Release History</span>
+    <h1 class="section-title"><span class="grad">Changelog</span></h1>
+    <p class="section-desc">Complete release notes and development history for Swordigo Desktop.</p>
+    <div class="mt-lg" style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
+      <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v1_beta" target="_blank" rel="noopener"
+         class="btn btn--secondary" id="changelog-github-btn">
+        View Full Commit History on GitHub →
+      </a>
+    </div>
+  </div>
+</div>
+
+<section class="section" id="v1-beta">
+  <div class="container container--narrow">
+
+    <!-- V1 BETA RELEASE BLOCK -->
+    <div class="release-block reveal">
+      <div class="release-header">
+        <div>
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:4px;">
+            <span class="release-version">v1 Beta</span>
+            <span class="badge badge--working">Latest</span>
+            <span class="badge badge--wip">Beta</span>
+          </div>
+          <div class="release-date">June 2026 • First Public Release</div>
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v1_beta/Swordigo-x86_64_v1beta.AppImage"
+             class="btn btn--primary" id="changelog-dl-btn">⬇ Download AppImage</a>
+          <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v1_beta" target="_blank" rel="noopener"
+             class="btn btn--secondary" id="changelog-commits-btn">📝 Commits</a>
+        </div>
+      </div>
+
+      <!-- What's Working -->
+      <div class="release-section">
+        <h3 class="working">✅ What's Working</h3>
+        <div class="grid grid--2" style="gap:var(--space-sm);">
+          <ul class="feature-list">
+            <li class="check">Main menu rendering</li>
+            <li class="check">In-game level rendering</li>
+            <li class="check">Gameplay and character movement</li>
+            <li class="check">Keyboard and mouse controls (to some extent)</li>
+          </ul>
+          <ul class="feature-list">
+            <li class="check">Sound effects</li>
+            <li class="check">OpenGL desktop renderer</li>
+            <li class="check">Asset loading and scene loading</li>
+            <li class="check">Linux-native execution through custom compatibility runtime</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Technical Notes -->
+      <div class="release-section">
+        <h3 class="technical">⚙️ Technical Notes</h3>
+        <ul class="feature-list">
+          <li>Runs the original ARM Android game library through a custom Linux runtime</li>
+          <li>Implements Android JNI and asset system replacements</li>
+          <li>Translates OpenGL ES 1.x rendering to desktop OpenGL</li>
+          <li>Uses native Linux windowing, input, and audio backends</li>
+          <li>Tested primarily on modern Linux distributions</li>
+        </ul>
+      </div>
+
+      <!-- Known Issues -->
+      <div class="release-section">
+        <h3 class="known-issues">⚠️ Known Issues</h3>
+        <ul class="feature-list">
+          <li class="warn">Save data is currently not written correctly and may not persist between sessions</li>
+          <li class="warn">Background music playback is unreliable and may fail to start</li>
+          <li class="warn">Music issues are more common in the AppImage build</li>
+          <li class="warn">Minor graphical artifacts may occasionally appear</li>
+          <li class="warn">Some Android-specific features remain stubbed or partially implemented</li>
+        </ul>
+      </div>
+
+      <!-- Notes -->
+      <div class="release-section">
+        <h3 class="notes">📝 Release Notes</h3>
+        <div style="background:rgba(0,0,0,0.25); border-radius:var(--radius-md); padding:var(--space-md) var(--space-lg); font-size:0.95rem; color:var(--clr-text-muted); line-height:1.85;">
+          <p>This is an early beta release intended for testing and feedback.</p>
+          <br>
+          <p>The game is playable, but some systems are still under active development. Future releases will focus on save support, audio stability, controller support, and general polish.</p>
+          <br>
+          <p>Thanks to everyone who tested and helped debug this project. ⚔️</p>
+        </div>
+      </div>
+
+      <!-- Direct links -->
+      <div style="background:rgba(139,61,255,0.07); border:1px solid rgba(139,61,255,0.2); border-radius:var(--radius-md); padding:var(--space-md) var(--space-lg);">
+        <div style="font-size:0.8rem; color:var(--clr-text-dim); margin-bottom:8px; font-family:var(--font-mono); text-transform:uppercase; letter-spacing:0.08em;">Direct Links</div>
+        <div style="display:flex; flex-direction:column; gap:6px;">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <span style="font-size:0.8rem; color:var(--clr-text-muted); width:120px; flex-shrink:0;">AppImage:</span>
+            <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v1_beta/Swordigo-x86_64_v1beta.AppImage"
+               style="font-family:var(--font-mono); font-size:0.75rem; color:var(--clr-cyan); word-break:break-all;">
+              github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v1_beta/Swordigo-x86_64_v1beta.AppImage
+            </a>
+          </div>
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <span style="font-size:0.8rem; color:var(--clr-text-muted); width:120px; flex-shrink:0;">Changelog:</span>
+            <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v1_beta" target="_blank" rel="noopener"
+               style="font-family:var(--font-mono); font-size:0.75rem; color:var(--clr-cyan);">
+              github.com/TheCorrectSynovian/SwordigoDesktop/commits/v1_beta
+            </a>
+          </div>
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <span style="font-size:0.8rem; color:var(--clr-text-muted); width:120px; flex-shrink:0;">Repository:</span>
+            <a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener"
+               style="font-family:var(--font-mono); font-size:0.75rem; color:var(--clr-cyan);">
+              github.com/TheCorrectSynovian/SwordigoDesktop
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- FUTURE ROADMAP -->
+    <div class="section-header reveal">
+      <span class="section-label">What's Next</span>
+      <h2 class="section-title">Development <span class="grad">Roadmap</span></h2>
+    </div>
+
+    <div class="grid grid--2 reveal" style="margin-bottom:var(--space-xl);">
+      <div class="card">
+        <span class="card__icon">💾</span>
+        <div class="card__title">Save System</div>
+        <div class="card__body">Fix save data writing — filesystem shim needs correct path mapping and flush behavior. Target: full persistence between sessions.</div>
+        <div class="mt-md"><span class="badge badge--issue">In Progress</span></div>
+      </div>
+      <div class="card">
+        <span class="card__icon">🎵</span>
+        <div class="card__title">Audio Stability</div>
+        <div class="card__body">Fix background music reliability. The MusicPlayer JNI callback surface and SoLoud/OpenAL audio backend need stabilization.</div>
+        <div class="mt-md"><span class="badge badge--issue">In Progress</span></div>
+      </div>
+      <div class="card">
+        <span class="card__icon">🎮</span>
+        <div class="card__title">Controller Support</div>
+        <div class="card__body">Add gamepad/controller input via SDL2 game controller API. Map analog sticks and buttons to the existing touch event system.</div>
+        <div class="mt-md"><span class="badge badge--wip">Planned</span></div>
+      </div>
+      <div class="card">
+        <span class="card__icon">✨</span>
+        <div class="card__title">General Polish</div>
+        <div class="card__body">Fix minor graphical artifacts, improve GLES 1.x translation accuracy, optimize performance, and improve input responsiveness.</div>
+        <div class="mt-md"><span class="badge badge--wip">Planned</span></div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- DEVELOPMENT MILESTONES -->
+<section class="section" style="background: rgba(13,16,32,0.7);" id="milestones">
+  <div class="container">
+    <div class="section-header reveal">
+      <span class="section-label">History</span>
+      <h2 class="section-title">Development <span class="grad">Milestones</span></h2>
+    </div>
+
+    <div class="milestone-grid reveal">
+      <div class="milestone-card">
+        <div class="date">2026-06-14 · Agent 1</div>
+        <h4>Research Phase Begins</h4>
+        <p>Mapped Vita loader architecture, Android boot sequence, native symbol exports, and ARM dependency catalog.</p>
+        <div class="mt-sm"><span class="badge badge--info" style="font-size:0.65rem;">Research</span></div>
+      </div>
+
+      <div class="milestone-card">
+        <div class="date">2026-06-14 · Agent 1</div>
+        <h4>Asset Format Discovery</h4>
+        <p>Confirmed protobuf encoding for .gdata, .scene, .gstate files. Found Lua 5.1 bytecode embedded in .scene files.</p>
+        <div class="mt-sm"><span class="badge badge--info" style="font-size:0.65rem;">Research</span></div>
+      </div>
+
+      <div class="milestone-card">
+        <div class="date">2026-06-14 · Agent 2</div>
+        <h4>Linux Loader Designed</h4>
+        <p>Produced complete linux_loader_design.md. Identified Unicorn as the optimal ARM emulation choice.</p>
+        <div class="mt-sm"><span class="badge badge--wip" style="font-size:0.65rem;">Design</span></div>
+      </div>
+
+      <div class="milestone-card">
+        <div class="date">2026-06-14 · Agent 2</div>
+        <h4>Version 1.4.6 Selected</h4>
+        <p>Compared v1.1 and v1.4.6 — v1.4.6 selected as target with 31 JNI exports matching Vita startup sequence.</p>
+        <div class="mt-sm"><span class="badge badge--wip" style="font-size:0.65rem;">Decision</span></div>
+      </div>
+
+      <div class="milestone-card">
+        <div class="date">2026-06-14 · Mission 6</div>
+        <h4>🎯 First Boot Success</h4>
+        <p>Unicorn engine integrated. setupNativeInterface() and handleApplicationLaunch() execute successfully for the first time.</p>
+        <div class="mt-sm"><span class="badge badge--working" style="font-size:0.65rem;">Milestone</span></div>
+      </div>
+
+      <div class="milestone-card">
+        <div class="date">2026-06-14 · Mission 7</div>
+        <h4>💥 .bss Bug Discovered</h4>
+        <p>UC_ERR_FETCH_UNMAPPED at 0x10000000 after 62M instructions traced to missing .bss zero-initialization.</p>
+        <div class="mt-sm"><span class="badge badge--issue" style="font-size:0.65rem;">Debugging</span></div>
+      </div>
+
+      <div class="milestone-card">
+        <div class="date">2026-06-14 · Mission 7</div>
+        <h4>🎉 setupApplication() Works</h4>
+        <p>After fixing the .bss bug and overhauling the JNI bridge, setupApplication() completes successfully. Tier 2 success.</p>
+        <div class="mt-sm"><span class="badge badge--working" style="font-size:0.65rem;">Milestone</span></div>
+      </div>
+
+      <div class="milestone-card">
+        <div class="date">2026-06-14 · Mission 7</div>
+        <h4>🖼️ drawApplication() Reached</h4>
+        <p>Over 1 million ARM instructions execute inside drawApplication(). The render loop is running.</p>
+        <div class="mt-sm"><span class="badge badge--working" style="font-size:0.65rem;">Milestone</span></div>
+      </div>
+
+      <div class="milestone-card">
+        <div class="date">2026-06-15</div>
+        <h4>Repo Cleanup &amp; Audit</h4>
+        <p>1.9GB repository audited. Copyrighted assets identified. .gitignore rewritten. CLEANUP_REPORT.md published.</p>
+        <div class="mt-sm"><span class="badge badge--wip" style="font-size:0.65rem;">Maintenance</span></div>
+      </div>
+
+      <div class="milestone-card" style="border-color:rgba(139,61,255,0.4); background:rgba(139,61,255,0.07);">
+        <div class="date">2026-06-16</div>
+        <h4>🚀 v1 Beta — Public Launch</h4>
+        <p>First public AppImage release. Main menu, gameplay, sound effects, and level rendering all working on Linux x86_64.</p>
+        <div class="mt-sm"><span class="badge badge--working" style="font-size:0.65rem;">Release</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="container">
+    <div class="footer__grid">
+      <div class="footer__brand">
+        <div style="margin-bottom:12px; display:flex; align-items:center; gap:10px; font-family:var(--font-display); font-weight:700; color:var(--clr-text);">
+          <span style="font-size:1.5rem;">⚔️</span>
+          <span style="background:var(--grad-text); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">Swordigo Desktop</span>
+        </div>
+        <p>From research to public release — the complete story of porting Swordigo to Linux.</p>
+      </div>
+      <div class="footer__col">
+        <h5>Navigation</h5>
+        <ul class="footer__links">
+          <li><a href="index.html">Home</a></li>
+          <li><a href="download.html">Download</a></li>
+          <li><a href="technical.html">Technical Docs</a></li>
+          <li><a href="research.html">Research Papers</a></li>
+          <li><a href="changelog.html">Changelog</a></li>
+        </ul>
+      </div>
+      <div class="footer__col">
+        <h5>Release</h5>
+        <ul class="footer__links">
+          <li><a href="#v1-beta">v1 Beta Notes</a></li>
+          <li><a href="#milestones">Dev Milestones</a></li>
+          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/commits/v1_beta" target="_blank" rel="noopener">GitHub Commits</a></li>
+        </ul>
+      </div>
+      <div class="footer__col">
+        <h5>Links</h5>
+        <ul class="footer__links">
+          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop" target="_blank" rel="noopener">GitHub Repository</a></li>
+          <li><a href="https://github.com/TheCorrectSynovian/SwordigoDesktop/releases/download/v1_beta/Swordigo-x86_64_v1beta.AppImage">Direct Download</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer__bottom">
+      <span>© 2026 SwordigoDesktop Project</span>
+      <span>Swordigo © Touch Foo</span>
+    </div>
+  </div>
+</footer>
+
+<script src="main.js"></script>
+</body>
+</html>
