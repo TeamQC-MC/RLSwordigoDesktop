@@ -13,8 +13,11 @@ public:
     ~Emulator();
 
     void set_pc(uint32_t pc);
+    uint32_t get_pc();
+    uint32_t get_lr();
     void set_reg(int reg, uint32_t value);
     uint32_t get_reg(int reg);
+    float get_vfp_reg(int reg);
 
     void run(uint32_t start_pc);
     uint32_t call(uint32_t addr, const std::vector<uint32_t>& args);

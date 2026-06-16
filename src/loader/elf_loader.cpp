@@ -24,8 +24,14 @@ int ElfLoader::resolve_all_to_bridge(so_module* mod, JniBridge* bridge, uint32_t
                 const char* name = mod->dynstr + sym->st_name;
                 if (name[0] == '\0') continue;
                 
-                // Identify if it's a data symbol or a function symbol
+                // Strip @version if present
                 std::string sname(name);
+                size_t at_pos = sname.find('@');
+                if (at_pos != std::string::npos) {
+                    sname = sname.substr(0, at_pos);
+                }
+                
+                // Identify if it's a data symbol or a function symbol
                 bool is_data = (sname == "__stack_chk_guard" || sname == "_ctype_" || sname == "__sF");
                 
                 if (is_data && globals_base != 0) {
@@ -33,8 +39,15 @@ int ElfLoader::resolve_all_to_bridge(so_module* mod, JniBridge* bridge, uint32_t
                     next_global += 8; // Advance global pointer
                     // std::cout << "[Resolve] Global " << name << " -> 0x" << std::hex << *ptr << std::dec << std::endl;
                 } else {
-                    uint32_t bridge_addr = bridge->get_address(name);
-                    *ptr = bridge_addr;
+                    uint32_t bridge_addr = bridge->get_address(sname.c_str());
+                    if (bridge_addr != 0) {
+                        *ptr = bridge_addr;
+                        if (sname == "sinf" || sname == "cosf" || sname == "atof" || sname == "gzread") {
+                            std::cout << "[Resolve] " << name << " (stripped: " << sname << ") -> 0x" << std::hex << bridge_addr << std::dec << std::endl;
+                        }
+                    } else {
+                        std::cerr << "[Resolve] WARNING: No bridge for " << name << std::endl;
+                    }
                 }
                 sym_count++;
             }
@@ -119,6 +132,9 @@ int ElfLoader::load(so_module* mod, const std::string& filename, uint32_t load_a
             mod->num_relplt = size / sizeof(Elf32_Rel);
         } else if (name == ".hash") {
             mod->hash = (uint32_t*)(guest_base + addr);
+        } else if (name == ".init_array") {
+            mod->init_array_vaddr = addr;
+            mod->init_array_size = size;
         }
     }
 
@@ -160,7 +176,7 @@ int ElfLoader::relocate(so_module* mod) {
             const char* sym_name = (sym->st_name > 0) ? (mod->dynstr + sym->st_name) : "(null)";
             bool is_suspicious = (after_value == 0x100018c || after_value == 0x46af94 || after_value > 0x20000000);
             
-            if (is_suspicious || i < 20) {
+            if (is_suspicious) {
                 const char* type_name = "UNKNOWN";
                 if (type == R_ARM_RELATIVE) type_name = "R_ARM_RELATIVE";
                 else if (type == R_ARM_ABS32) type_name = "R_ARM_ABS32";

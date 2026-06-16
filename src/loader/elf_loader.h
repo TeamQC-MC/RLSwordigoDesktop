@@ -37,6 +37,9 @@ struct so_module {
     int num_reldyn;
     int num_relplt;
     
+    uint32_t init_array_vaddr = 0;
+    uint32_t init_array_size = 0;
+    
     std::string soname;
 };
 

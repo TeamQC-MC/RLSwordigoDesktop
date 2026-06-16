@@ -27,11 +27,43 @@ ElfLoader* g_loader = nullptr;
 JniBridge g_bridge;
 Emulator* g_emulator = nullptr;
 
+void call_handle_touch_event(uint32_t addr, uint32_t env, uint32_t obj, int action, int id, double time_val, float x, float y, float old_x, float old_y, int tap_count) {
+    if (addr == 0) return;
+    
+    // Save current SP
+    uint32_t old_sp = g_emulator->get_reg(13);
+    
+    // Allocate stack space (aligned to 8 bytes)
+    uint32_t new_sp = old_sp - 32;
+    g_emulator->set_reg(13, new_sp);
+    
+    // Write stack arguments to guest memory
+    uint8_t* memory = g_emulator->get_memory_base();
+    *(double*)(memory + new_sp + 0) = time_val;
+    *(float*)(memory + new_sp + 8) = x;
+    *(float*)(memory + new_sp + 12) = y;
+    *(float*)(memory + new_sp + 16) = old_x;
+    *(float*)(memory + new_sp + 20) = old_y;
+    *(uint32_t*)(memory + new_sp + 24) = tap_count;
+    
+    // R0-R3 registers
+    g_emulator->set_reg(0, env);
+    g_emulator->set_reg(1, obj);
+    g_emulator->set_reg(2, action);
+    g_emulator->set_reg(3, id);
+    
+    // Run guest function
+    g_emulator->run(addr);
+    
+    // Restore SP
+    g_emulator->set_reg(13, old_sp);
+}
+
 void init_all() {
     g_guest_memory = new uint8_t[GUEST_MEM_SIZE];
     g_loader = new ElfLoader(g_guest_memory, GUEST_MEM_SIZE);
     g_bridge.init_standard_bridges();
-    asset_manager_init("assets/resources");
+    asset_manager_init("assets");
     std::cout << "[Main] Infrastructure initialized." << std::endl;
 }
 
@@ -126,6 +158,23 @@ void load_and_boot() {
     g_emulator = new Emulator(g_guest_memory, GUEST_MEM_SIZE);
     g_emulator->set_bridge(&g_bridge);
 
+    // Run dynamic initializers (.init_array)
+    if (g_main_mod.init_array_vaddr != 0 && g_main_mod.init_array_size > 0) {
+        int count = g_main_mod.init_array_size / 4;
+        std::cout << "[Boot] Executing " << count << " dynamic initializers..." << std::endl;
+        uint32_t* init_array = (uint32_t*)(g_guest_memory + g_main_mod.init_array_vaddr);
+        for (int i = 0; i < count; i++) {
+            uint32_t init_func = init_array[i];
+            if (init_func != 0) {
+                if (i % 50 == 0 || i == count - 1) {
+                    std::cout << "  -> Initializer " << i << "/" << count << " at 0x" << std::hex << init_func << std::dec << std::endl;
+                }
+                g_emulator->call(init_func, {});
+            }
+        }
+        std::cout << "[Boot] Dynamic initializers completed successfully." << std::endl;
+    }
+
     // 4. Boot Sequence
     uint32_t setFilesDir = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_setFilesDir");
     uint32_t setCacheDir = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_setCacheDir");
@@ -200,6 +249,7 @@ void load_and_boot() {
     // 5. Game Loop — 1000-frame stability test
     uint32_t updateApp = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_updateApplication");
     uint32_t drawApp = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_drawApplication");
+    uint32_t handleTouchEvent = g_loader->get_symbol_vaddr(&g_main_mod, "Java_com_touchfoo_swordigo_Native_handleTouchEvent");
 
     if (updateApp && drawApp) {
         // IEEE 754 for 1/60 (~0.01667f) = 0x3c888889
@@ -224,52 +274,178 @@ void load_and_boot() {
         }
         std::cout << "========================================\n" << std::endl;
 
-        // Suppress verbose per-call logging during game loop
-        g_emulator->quiet_mode = true;
-
         // Get the display pointer from main (passed via extern)
         extern Display* g_display_ptr;
+
+        // Input states for touch mapping
+        float last_mouse_x = -1.0f;
+        float last_mouse_y = -1.0f;
+        bool mouse_pressed = false;
+
+        bool key_left = false;
+        bool key_right = false;
+        bool key_jump = false;
+        bool key_attack = false;
+        bool key_magic = false;
+        bool key_use_item = false;
+        bool key_menu = false;
 
         bool running = true;
         while (running) {
             g_frame_stats.reset();
             
+            // Show details for first 2 frames to trace scene loading
+            if (completed_frames < 2) {
+                g_emulator->quiet_mode = false;
+            } else {
+                g_emulator->quiet_mode = true;
+            }
+            
+            if (completed_frames == 5) {
+                std::cout << "[Test] Simulating touch event (mouse click) in headless mode..." << std::endl;
+                g_emulator->quiet_mode = false; // Turn on logging
+                float x = 400.0f; // Click center
+                float y = 240.0f;
+                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 1, 1, 0.0, x, y, x, y, 1);
+                if (x >= 200.0f) {
+                    call_handle_touch_event(handleTouchEvent, env_ptr, 0, 1, 8, 0.0, 658.0f, 83.0f, 658.0f, 83.0f, 1);
+                }
+            }
             g_emulator->call(updateApp, {env_ptr, 0, dt_hex});
             g_emulator->call(drawApp, {env_ptr, 0});
             
-            // --- Diagnostic Triangle Test (Mission 10) ---
+            extern int g_gl_diag_frame;
+            g_gl_diag_frame++;
+            
+            // Present the frame (engine's own GL calls already went to OpenGL)
             if (g_display_active && g_display_ptr) {
-                // To avoid interfering with engine state, we do this after drawApp
-                // glClear(GL_DEPTH_BUFFER_BIT); // Optional
-
-                glMatrixMode(GL_PROJECTION);
-                glPushMatrix();
-                glLoadIdentity();
-                glOrtho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0);
-
-                glMatrixMode(GL_MODELVIEW);
-                glPushMatrix();
-                glLoadIdentity();
-
-                glDisable(GL_TEXTURE_2D);
-                glDisable(GL_LIGHTING);
-                glDisable(GL_CULL_FACE);
-                glDisable(GL_DEPTH_TEST);
-
-                glBegin(GL_TRIANGLES);
-                glColor3f(1.0f, 0.0f, 0.0f); glVertex2f(-0.5f, -0.5f);
-                glColor3f(0.0f, 1.0f, 0.0f); glVertex2f(0.5f, -0.5f);
-                glColor3f(0.0f, 0.0f, 1.0f); glVertex2f(0.0f, 0.5f);
-                glEnd();
-
-                glMatrixMode(GL_PROJECTION); glPopMatrix();
-                glMatrixMode(GL_MODELVIEW); glPopMatrix();
-
-                extern int g_gl_diag_frame;
+                // Capture BEFORE swap — reads the completed back buffer that is about to be shown
+                if (g_gl_diag_frame == 3) {
+                    const int W = 800, H = 480;
+                    std::vector<uint8_t> pixels(W * H * 3);
+                    glFinish(); // ensure all GL commands completed
+                    glReadPixels(0, 0, W, H, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+                    GLenum err = glGetError();
+                    FILE* f = fopen("/tmp/swordigo_capture.ppm", "wb");
+                    if (f) {
+                        fprintf(f, "P6\n%d %d\n255\n", W, H);
+                        for (int row = H-1; row >= 0; row--)
+                            fwrite(pixels.data() + row*W*3, 1, W*3, f);
+                        fclose(f);
+                        std::cout << "[CAPTURE] Frame " << g_gl_diag_frame
+                                  << " saved to /tmp/swordigo_capture.ppm"
+                                  << " (GL err=" << err << ")" << std::endl;
+                    }
+                }
+                
                 g_display_ptr->swap();
-                g_gl_diag_frame++;
-                g_display_ptr->poll_events();
-                if (g_display_ptr->should_close()) running = false;
+                
+                // Poll and process SDL window and input events
+                SDL_Event event;
+                while (SDL_PollEvent(&event)) {
+                    switch (event.type) {
+                        case SDL_QUIT:
+                            running = false;
+                            break;
+                        case SDL_WINDOWEVENT:
+                            if (event.window.event == SDL_WINDOWEVENT_CLOSE) {
+                                running = false;
+                            }
+                            break;
+                        case SDL_MOUSEBUTTONDOWN:
+                            if (event.button.button == SDL_BUTTON_LEFT) {
+                                mouse_pressed = true;
+                                float x = event.button.x;
+                                float y = 480.0f - event.button.y;
+                                last_mouse_x = x;
+                                last_mouse_y = y;
+                                // Primary touch click
+                                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 1, 1, 0.0, x, y, x, y, 1);
+                                // If click is on the right side of the screen, also trigger Attack button
+                                if (x >= 200.0f) {
+                                    call_handle_touch_event(handleTouchEvent, env_ptr, 0, 1, 8, 0.0, 658.0f, 83.0f, 658.0f, 83.0f, 1);
+                                }
+                            }
+                            break;
+                        case SDL_MOUSEMOTION:
+                            if (mouse_pressed) {
+                                float x = event.motion.x;
+                                float y = 480.0f - event.motion.y;
+                                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 4, 1, 0.0, x, y, last_mouse_x, last_mouse_y, 0);
+                                last_mouse_x = x;
+                                last_mouse_y = y;
+                            }
+                            break;
+                        case SDL_MOUSEBUTTONUP:
+                            if (event.button.button == SDL_BUTTON_LEFT) {
+                                mouse_pressed = false;
+                                float x = event.button.x;
+                                float y = 480.0f - event.button.y;
+                                call_handle_touch_event(handleTouchEvent, env_ptr, 0, 2, 1, 0.0, x, y, last_mouse_x, last_mouse_y, 0);
+                                if (last_mouse_x >= 200.0f || x >= 200.0f) {
+                                    call_handle_touch_event(handleTouchEvent, env_ptr, 0, 2, 8, 0.0, 658.0f, 83.0f, 658.0f, 83.0f, 0);
+                                }
+                                last_mouse_x = -1.0f;
+                                last_mouse_y = -1.0f;
+                            }
+                            break;
+                        case SDL_KEYDOWN:
+                        case SDL_KEYUP: {
+                            bool is_down = (event.type == SDL_KEYDOWN);
+                            switch (event.key.keysym.sym) {
+                                case SDLK_LEFT:
+                                case SDLK_a:
+                                    if (key_left != is_down) {
+                                        key_left = is_down;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 6, 0.0, 50.0f, 83.0f, 50.0f, 83.0f, is_down ? 1 : 0);
+                                    }
+                                    break;
+                                case SDLK_RIGHT:
+                                case SDLK_d:
+                                    if (key_right != is_down) {
+                                        key_right = is_down;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 7, 0.0, 129.0f, 83.0f, 129.0f, 83.0f, is_down ? 1 : 0);
+                                    }
+                                    break;
+                                case SDLK_SPACE:
+                                case SDLK_UP:
+                                case SDLK_w:
+                                    if (key_jump != is_down) {
+                                        key_jump = is_down;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 5, 0.0, 750.0f, 83.0f, 750.0f, 83.0f, is_down ? 1 : 0);
+                                    }
+                                    break;
+                                case SDLK_j:
+                                case SDLK_z:
+                                    if (key_attack != is_down) {
+                                        key_attack = is_down;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 8, 0.0, 658.0f, 83.0f, 658.0f, 83.0f, is_down ? 1 : 0);
+                                    }
+                                    break;
+                                case SDLK_k:
+                                case SDLK_x:
+                                    if (key_magic != is_down) {
+                                        key_magic = is_down;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 10, 0.0, 750.0f, 162.0f, 750.0f, 162.0f, is_down ? 1 : 0);
+                                    }
+                                    break;
+                                case SDLK_i:
+                                    if (key_use_item != is_down) {
+                                        key_use_item = is_down;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 12, 0.0, 354.0f, 48.0f, 354.0f, 48.0f, is_down ? 1 : 0);
+                                    }
+                                    break;
+                                case SDLK_ESCAPE:
+                                    if (key_menu != is_down) {
+                                        key_menu = is_down;
+                                        call_handle_touch_event(handleTouchEvent, env_ptr, 0, is_down ? 1 : 2, 9, 0.0, 40.0f, 441.0f, 40.0f, 441.0f, is_down ? 1 : 0);
+                                    }
+                                    break;
+                            }
+                            break;
+                        }
+                    }
+                }
             }
             
             completed_frames++;
@@ -343,14 +519,7 @@ int main(int argc, char* argv[]) {
         if (display.init(800, 480, "Swordigo Desktop")) {
             g_display_active = true;
             g_display_ptr = &display;
-            
-            // Enable diagnostics (Mission 10)
-            extern bool g_gl_force_white;
-            extern bool g_gl_force_identity;
-            g_gl_force_white = true;
-            g_gl_force_identity = true;
-
-            std::cout << "[Main] Display initialized — visual mode (Diagnostics ENABLED)" << std::endl;
+            std::cout << "[Main] Display initialized — visual mode (real GL rendering)" << std::endl;
         } else {
             std::cerr << "[Main] Display init failed, falling back to headless" << std::endl;
         }

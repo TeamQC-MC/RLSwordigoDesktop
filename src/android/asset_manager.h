@@ -4,6 +4,16 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include <stdio.h>
+
+struct AAssetManager {
+    char base_path[256];
+};
+
+struct AAsset {
+    FILE* fp;
+    char name[256];
+};
 
 typedef struct AAssetManager AAssetManager;
 typedef struct AAsset AAsset;

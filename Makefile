@@ -2,7 +2,7 @@ CC=g++
 CFLAGS=-Isrc -std=c++17
 LIBS=-lunicorn
 SDL_FLAGS=$(shell pkg-config --cflags --libs sdl2)
-GL_FLAGS=-lGL
+GL_FLAGS=-lGL -lz -lopenal
 
 COMMON_SRC=src/loader/elf_loader.cpp src/jni/jni_bridge.cpp src/platform/emulator.cpp src/android/asset_manager.c src/android/log.c
 

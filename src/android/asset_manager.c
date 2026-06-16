@@ -2,15 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-struct AAssetManager {
-    char base_path[256];
-};
-
-struct AAsset {
-    FILE* fp;
-    char name[256];
-};
+#include <unistd.h>
 
 static struct AAssetManager g_mgr;
 
@@ -24,7 +16,13 @@ AAssetManager* AAssetManager_fromJava(void* env, void* assetManager) {
 
 AAsset* AAssetManager_open(AAssetManager* mgr, const char* filename, int mode) {
     char full_path[512];
-    snprintf(full_path, sizeof(full_path), "%s/%s", mgr->base_path, filename);
+    
+    // If filename starts with ./, don't prepend base_path
+    if (filename[0] == '.' && filename[1] == '/') {
+        strncpy(full_path, filename, sizeof(full_path));
+    } else {
+        snprintf(full_path, sizeof(full_path), "%s/%s", mgr->base_path, filename);
+    }
     
     printf("OPEN: %s\n", filename);
     
@@ -36,9 +34,11 @@ AAsset* AAssetManager_open(AAssetManager* mgr, const char* filename, int mode) {
 
     FILE* fp = fopen(full_path, "rb");
     if (!fp) {
-        // printf("AssetManager: Failed to open %s\n", full_path);
+        printf("OPEN FAILED: %s\n", full_path);
         return NULL;
     }
+    
+    printf("OPEN SUCCESS: %s\n", full_path);
     
     AAsset* asset = (AAsset*)malloc(sizeof(AAsset));
     asset->fp = fp;
@@ -76,5 +76,5 @@ int AAsset_openFileDescriptor(AAsset* asset, off_t* outStart, off_t* outLength) 
     if (!asset || !asset->fp) return -1;
     *outStart = 0;
     *outLength = AAsset_getLength(asset);
-    return fileno(asset->fp);
+    return dup(fileno(asset->fp));
 }

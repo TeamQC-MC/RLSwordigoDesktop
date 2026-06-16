@@ -1,5 +1,6 @@
 #include "emulator.h"
 #include <iostream>
+#include <cstring>
 #include <unicorn/unicorn.h>
 
 static uint32_t g_instruction_count = 0;
@@ -24,6 +25,52 @@ static void hook_code(uc_engine *uc, uint64_t address, uint32_t size, void *user
 
     if (address >= emu->get_bridge_base()) {
         emu->handle_bridge_call(address);
+    }
+    
+    // Debug hook for BackgroundComponent::Prepare
+    if (address == 0x11d4a8a) {
+        float s0 = emu->get_vfp_reg(0);
+        uint32_t s0_i;
+        memcpy(&s0_i, &s0, 4);
+        std::cout << "[DEBUG] Prepare @ 0x11d4a8a: s0=" << s0 << " (0x" << std::hex << s0_i << ")" << std::dec << std::endl;
+    }
+    if (address == 0x11d4ada) {
+        float s4 = emu->get_vfp_reg(4);
+        float s18 = emu->get_vfp_reg(18);
+        std::cout << "[DEBUG] Prepare @ 0x11d4ada: s18=" << s18 << " s4=" << s4 << std::endl;
+    }
+
+    // Debug hook for setApplicationViewSize skip check
+    if (address == 0x12f3a68) {
+        uint32_t r0 = emu->get_reg(0);
+        std::cout << "[DEBUG] setApplicationViewSize @ 0x12f3a68: r0=" << std::hex << r0 << std::dec << std::endl;
+    }
+
+    // Debug hook for setModelName
+    if (address == 0x11d782c || address == 0x11d782d || address == 0x11d782e) {
+        uint32_t this_ptr = emu->get_reg(0);
+        uint32_t name_str_ptr = emu->get_reg(1);
+        uint8_t* memory = emu->get_memory_base();
+        uint32_t char_addr = *(uint32_t*)(memory + name_str_ptr);
+        std::cout << "[DEBUG] setModelName(this=0x" << std::hex << this_ptr 
+                  << ", name_str_ptr=0x" << name_str_ptr << ", char_addr=0x" << char_addr << ")" << std::dec << std::endl;
+        if (char_addr >= 0x10000 && char_addr < 0x30000000) {
+            const char* model_name = (const char*)(memory + char_addr);
+            std::cout << "  -> model name: \"" << model_name << "\"" << std::endl;
+        }
+    }
+
+    // Debug hook for ReadPODModelFromFile
+    if (address == 0x12dd334 || address == 0x12dd335 || address == 0x12dd336) {
+        uint32_t name_str_ptr = emu->get_reg(1);
+        uint8_t* memory = emu->get_memory_base();
+        uint32_t char_addr = *(uint32_t*)(memory + name_str_ptr);
+        std::cout << "[DEBUG] ReadPODModelFromFile(name_str_ptr=0x" << std::hex << name_str_ptr 
+                  << ", char_addr=0x" << char_addr << ")" << std::dec << std::endl;
+        if (char_addr >= 0x10000 && char_addr < 0x30000000) {
+            const char* model_path = (const char*)(memory + char_addr);
+            std::cout << "  -> model path: \"" << model_path << "\"" << std::endl;
+        }
     }
 }
 
@@ -98,6 +145,28 @@ uint32_t Emulator::get_reg(int reg) {
     if (reg == 14) uc_reg = UC_ARM_REG_LR;
     if (reg == 15) uc_reg = UC_ARM_REG_PC;
     uc_reg_read((uc_engine*)uc, uc_reg, &val);
+    return val;
+}
+
+float Emulator::get_vfp_reg(int reg) {
+    union {
+        uint32_t i;
+        float f;
+    } val;
+    int uc_reg = UC_ARM_REG_S0 + reg;
+    uc_reg_read((uc_engine*)uc, uc_reg, &val.i);
+    return val.f;
+}
+
+uint32_t Emulator::get_pc() {
+    uint32_t val;
+    uc_reg_read((uc_engine*)uc, UC_ARM_REG_PC, &val);
+    return val;
+}
+
+uint32_t Emulator::get_lr() {
+    uint32_t val;
+    uc_reg_read((uc_engine*)uc, UC_ARM_REG_LR, &val);
     return val;
 }
 

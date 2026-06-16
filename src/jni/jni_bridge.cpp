@@ -10,11 +10,15 @@
 #include <unordered_set>
 #include <mutex>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <sys/time.h>
 #include <time.h>
+#include <unistd.h>
 #define GL_GLEXT_PROTOTYPES
 #include <GL/gl.h>
 #include <GL/glext.h>
+#include <AL/al.h>
+#include <AL/alc.h>
 
 // When true, GL bridge functions call real OpenGL instead of no-ops
 bool g_display_active = false;
@@ -174,6 +178,10 @@ void bridge_realloc(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     uint32_t ptr = emu->get_reg(0);
     uint32_t size = emu->get_reg(1);
+    if (ptr != 0 && g_guest_allocs.count(ptr) == 0) {
+        std::cout << "[ALLOC] WARNING: realloc called on unregistered pointer 0x" << std::hex << ptr 
+                  << " (requested size: " << std::dec << size << ")" << std::endl;
+    }
     if (ptr == 0) {
         uint32_t addr = g_guest_heap_ptr;
         g_guest_heap_ptr += (size + 7) & ~7;
@@ -213,8 +221,11 @@ void bridge_memcpy(void* emu_ptr) {
     uint32_t dest = emu->get_reg(0);
     uint32_t src = emu->get_reg(1);
     uint32_t n = emu->get_reg(2);
+    if (!emu->quiet_mode) {
+        std::cout << "[MEM] memcpy(dest=0x" << std::hex << dest << ", src=0x" << src << ", n=" << std::dec << n << ")" << std::endl;
+    }
     if (n > 0) {
-        std::memcpy(emu->get_memory_base() + dest, emu->get_memory_base() + src, n);
+        std::memmove(emu->get_memory_base() + dest, emu->get_memory_base() + src, n);
     }
     emu->set_reg(0, dest);
 }
@@ -235,6 +246,9 @@ void bridge_memmove(void* emu_ptr) {
     uint32_t dest = emu->get_reg(0);
     uint32_t src = emu->get_reg(1);
     uint32_t n = emu->get_reg(2);
+    if (!emu->quiet_mode) {
+        std::cout << "[MEM] memmove(dest=0x" << std::hex << dest << ", src=0x" << src << ", n=" << std::dec << n << ")" << std::endl;
+    }
     if (n > 0) {
         std::memmove(emu->get_memory_base() + dest, emu->get_memory_base() + src, n);
     }
@@ -245,6 +259,9 @@ void bridge_strlen(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     uint32_t str = emu->get_reg(0);
     const char* s = (const char*)(emu->get_memory_base() + str);
+    if (!emu->quiet_mode) {
+        std::cout << "[STR] strlen(str=0x" << std::hex << str << ") -> \"" << s << "\"" << std::dec << std::endl;
+    }
     emu->set_reg(0, std::strlen(s));
 }
 
@@ -286,7 +303,7 @@ void bridge_aeabi_memcpy(void* emu_ptr) {
     uint32_t src = emu->get_reg(1);
     uint32_t n = emu->get_reg(2);
     if (n > 0) {
-        std::memcpy(emu->get_memory_base() + dest, emu->get_memory_base() + src, n);
+        std::memmove(emu->get_memory_base() + dest, emu->get_memory_base() + src, n);
     }
 }
 
@@ -387,43 +404,119 @@ void bridge_aeabi_uldivmod(void* emu_ptr) {
 void bridge_cosf(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     float x = uint_to_float(emu->get_reg(0));
-    emu->set_reg(0, float_to_uint(std::cos(x)));
+    float res = std::cos(x);
+    if (!emu->quiet_mode) {
+        std::cout << "[Math] cosf(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
+    }
+    emu->set_reg(0, float_to_uint(res));
 }
 
 void bridge_sinf(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     float x = uint_to_float(emu->get_reg(0));
-    emu->set_reg(0, float_to_uint(std::sin(x)));
+    float res = std::sin(x);
+    if (!emu->quiet_mode) {
+        std::cout << "[Math] sinf(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
+    }
+    emu->set_reg(0, float_to_uint(res));
+}
+
+void bridge_atan2f(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    float y = uint_to_float(emu->get_reg(0));
+    float x = uint_to_float(emu->get_reg(1));
+    float res = std::atan2(y, x);
+    if (!emu->quiet_mode) {
+        std::cout << "[Math] atan2f(" << y << ", " << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
+    }
+    emu->set_reg(0, float_to_uint(res));
+}
+
+void bridge_powf(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    float x = uint_to_float(emu->get_reg(0));
+    float y = uint_to_float(emu->get_reg(1));
+    float res = std::pow(x, y);
+    if (!emu->quiet_mode) {
+        std::cout << "[Math] powf(" << x << ", " << y << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
+    }
+    emu->set_reg(0, float_to_uint(res));
+}
+
+void bridge_pow(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    // double is 64-bit, but Android arm32 might use pairs of registers
+    // For now, let's just log it if we suspect it's causing NaNs.
+    std::cout << "[Math] pow(double) called - potential precision/ABI issue" << std::endl;
+    emu->set_reg(0, 0); // Placeholder
+}
+
+void bridge_tan(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    // Android ARM uses softfp for doubles: R0, R1
+    uint32_t r0 = emu->get_reg(0);
+    uint32_t r1 = emu->get_reg(1);
+    double x;
+    uint64_t x_i = ((uint64_t)r1 << 32) | r0;
+    memcpy(&x, &x_i, 8);
+    double res = std::tan(x);
+    if (!emu->quiet_mode || std::isnan(res)) {
+        std::cout << "[Math] tan(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
+    }
+    uint64_t res_i;
+    memcpy(&res_i, &res, 8);
+    emu->set_reg(0, (uint32_t)res_i);
+    emu->set_reg(1, (uint32_t)(res_i >> 32));
 }
 
 void bridge_tanf(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     float x = uint_to_float(emu->get_reg(0));
-    emu->set_reg(0, float_to_uint(std::tan(x)));
+    float res = std::tan(x);
+    if (!emu->quiet_mode || std::isnan(res)) {
+        std::cout << "[Math] tanf(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
+    }
+    emu->set_reg(0, float_to_uint(res));
 }
 
 void bridge_roundf(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     float x = uint_to_float(emu->get_reg(0));
-    emu->set_reg(0, float_to_uint(std::round(x)));
+    float res = std::round(x);
+    if (!emu->quiet_mode) {
+        std::cout << "[Math] roundf(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
+    }
+    emu->set_reg(0, float_to_uint(res));
 }
 
 void bridge_floorf(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     float x = uint_to_float(emu->get_reg(0));
-    emu->set_reg(0, float_to_uint(std::floor(x)));
+    float res = std::floor(x);
+    if (!emu->quiet_mode) {
+        std::cout << "[Math] floorf(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
+    }
+    emu->set_reg(0, float_to_uint(res));
 }
 
 void bridge_ceilf(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     float x = uint_to_float(emu->get_reg(0));
-    emu->set_reg(0, float_to_uint(std::ceil(x)));
+    float res = std::ceil(x);
+    if (!emu->quiet_mode) {
+        std::cout << "[Math] ceilf(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
+    }
+    emu->set_reg(0, float_to_uint(res));
 }
 
 void bridge_sqrtf(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     float x = uint_to_float(emu->get_reg(0));
-    emu->set_reg(0, float_to_uint(std::sqrt(x)));
+    float res = std::sqrt(x);
+    if (!emu->quiet_mode) {
+        std::cout << "[Math] sqrtf(" << x << ") -> " << res << (std::isnan(res) ? " (NaN!)" : "") << std::endl;
+    }
+    emu->set_reg(0, float_to_uint(res));
 }
 
 
@@ -470,20 +563,6 @@ void bridge_log10f(void* emu_ptr) {
     emu->set_reg(0, float_to_uint(std::log10(x)));
 }
 
-void bridge_atan2f(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float y = uint_to_float(emu->get_reg(0));
-    float x = uint_to_float(emu->get_reg(1));
-    emu->set_reg(0, float_to_uint(std::atan2(y, x)));
-}
-
-void bridge_powf(void* emu_ptr) {
-    Emulator* emu = (Emulator*)emu_ptr;
-    float base = uint_to_float(emu->get_reg(0));
-    float exp = uint_to_float(emu->get_reg(1));
-    emu->set_reg(0, float_to_uint(std::pow(base, exp)));
-}
-
 void bridge_sincosf(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     float x = uint_to_float(emu->get_reg(0));
@@ -523,7 +602,7 @@ void bridge_GetMethodID(void* emu_ptr) {
     else if (strcmp(name, "setVolume") == 0) id = 0x13240001;
     else if (strcmp(name, "<init>") == 0) id = 0x13000001;
     else id = 0x56780001;
-    if (!emu->quiet_mode || strcmp(name, "getPlatformConsentState") == 0 || strcmp(name, "isAgeKnown") == 0) {
+    if (!emu->quiet_mode) {
         std::cout << "[JNI] GetMethodID: " << name << " -> 0x" << std::hex << id << std::dec << std::endl;
     }
     emu->set_reg(0, id);
@@ -540,19 +619,41 @@ void bridge_NewGlobalRef(void* emu_ptr) {
     emu->set_reg(0, obj);
 }
 
+static std::unordered_map<uint32_t, std::string> g_jstrings;
+static uint32_t g_next_jstring = 0x99990001;
+
 void bridge_NewStringUTF(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
-    emu->set_reg(0, 0x99990001);
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t str_ptr = emu->get_reg(1);
+    
+    std::string str = "";
+    if (str_ptr != 0) {
+        str = (const char*)(memory + str_ptr);
+    }
+    
+    uint32_t handle = g_next_jstring++;
+    g_jstrings[handle] = str;
+    
+    emu->set_reg(0, handle);
 }
 
 void bridge_GetStringUTFChars(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
     uint32_t jstr = emu->get_reg(1);
+    
     if (jstr >= 0x20000 && jstr < 0x21000) {
         emu->set_reg(0, jstr);
+    } else if (g_jstrings.count(jstr) > 0) {
+        std::string str = g_jstrings[jstr];
+        uint32_t addr = g_guest_heap_ptr;
+        g_guest_heap_ptr += (str.length() + 8) & ~7;
+        std::strcpy((char*)(memory + addr), str.c_str());
+        emu->set_reg(0, addr);
     } else {
         uint32_t addr = 0x30000;
-        strcpy((char*)(emu->get_memory_base() + addr), "dummy_jni_string");
+        strcpy((char*)(memory + addr), "dummy_jni_string");
         emu->set_reg(0, addr);
     }
 }
@@ -592,6 +693,7 @@ void bridge_AAssetManager_open(void* emu_ptr) {
     }
     
     void* asset = AAssetManager_open(mgr, filename, emu->get_reg(2));
+    std::cout << "[ASSET] Open " << filename << (asset ? " -> SUCCESS" : " -> FAILED") << std::endl;
     emu->set_reg(0, register_pointer(asset));
 }
 
@@ -602,7 +704,12 @@ void bridge_AAsset_read(void* emu_ptr) {
     uint8_t* memory = emu->get_memory_base();
     AAsset* asset = (AAsset*)get_pointer(emu->get_reg(0));
     void* buf = (void*)(memory + emu->get_reg(1));
-    emu->set_reg(0, AAsset_read(asset, buf, emu->get_reg(2)));
+    uint32_t count = emu->get_reg(2);
+    int read = AAsset_read(asset, buf, count);
+    if (read > 0 && !emu->quiet_mode) {
+        std::cout << "[Asset] READ: " << (asset ? asset->name : "NULL") << " (" << read << " bytes) to 0x" << std::hex << emu->get_reg(1) << std::dec << std::endl;
+    }
+    emu->set_reg(0, read);
 }
 
 void bridge_AAsset_close(void* emu_ptr) {
@@ -624,7 +731,11 @@ void bridge_AAsset_openFileDescriptor(void* emu_ptr) {
     AAsset* asset = (AAsset*)get_pointer(emu->get_reg(0));
     off_t* outStart = (off_t*)(memory + emu->get_reg(1));
     off_t* outLength = (off_t*)(memory + emu->get_reg(2));
-    emu->set_reg(0, AAsset_openFileDescriptor(asset, outStart, outLength));
+    int fd = AAsset_openFileDescriptor(asset, outStart, outLength);
+    if (!emu->quiet_mode) {
+        std::cout << "[Asset] openFileDescriptor: " << (asset ? asset->name : "NULL") << " -> fd=" << fd << std::endl;
+    }
+    emu->set_reg(0, fd);
 }
 
 // --- RESTORED JNI ENVIRONMENT SHIMS ---
@@ -689,24 +800,135 @@ void bridge_CallObjectMethodV(void* emu_ptr) {
     }
 }
 
+static bool g_music_looping = false;
+static float g_music_volume = 1.0f;
+static ALuint g_music_source = 0;
+static ALuint g_music_buffer = 0;
+
+static bool load_wav_to_buffer(const std::string& path, ALuint buffer) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    
+    char chunk_id[4];
+    uint32_t chunk_size;
+    
+    // Read RIFF header
+    if (fread(chunk_id, 1, 4, f) != 4 ||
+        fread(&chunk_size, 4, 1, f) != 1 ||
+        fread(chunk_id, 1, 4, f) != 4 || // Format: should be "WAVE"
+        std::memcmp(chunk_id, "WAVE", 4) != 0) {
+        fclose(f);
+        return false;
+    }
+    
+    uint16_t audio_format = 0;
+    uint16_t channels = 0;
+    uint32_t sample_rate = 0;
+    uint16_t bits_per_sample = 0;
+    std::vector<uint8_t> data;
+    
+    while (fread(chunk_id, 1, 4, f) == 4) {
+        if (fread(&chunk_size, 4, 1, f) != 1) break;
+        if (std::memcmp(chunk_id, "fmt ", 4) == 0) {
+            fread(&audio_format, 2, 1, f);
+            fread(&channels, 2, 1, f);
+            fread(&sample_rate, 4, 1, f);
+            fseek(f, 6, SEEK_CUR); // skip byte_rate, block_align
+            fread(&bits_per_sample, 2, 1, f);
+            if (chunk_size > 16) {
+                fseek(f, chunk_size - 16, SEEK_CUR);
+            }
+        } else if (std::memcmp(chunk_id, "data", 4) == 0) {
+            data.resize(chunk_size);
+            fread(data.data(), 1, chunk_size, f);
+            break;
+        } else {
+            fseek(f, chunk_size, SEEK_CUR);
+        }
+    }
+    fclose(f);
+    
+    if (data.empty()) return false;
+    
+    ALenum al_format = AL_FORMAT_MONO8;
+    if (channels == 1) {
+        al_format = (bits_per_sample == 16) ? AL_FORMAT_MONO16 : AL_FORMAT_MONO8;
+    } else {
+        al_format = (bits_per_sample == 16) ? AL_FORMAT_STEREO16 : AL_FORMAT_STEREO8;
+    }
+    
+    alBufferData(buffer, al_format, data.data(), data.size(), sample_rate);
+    return alGetError() == AL_NO_ERROR;
+}
+
 void bridge_CallBooleanMethodV(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
-    emu->set_reg(0, 1);
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t obj = emu->get_reg(1);
+    uint32_t method_id = emu->get_reg(2);
+    uint32_t va_list_ptr = emu->get_reg(3);
+    
+    uint32_t res = 0;
+    if (method_id == 0x13190001) { // loadFile
+        uint32_t jstr = *(uint32_t*)(memory + va_list_ptr);
+        std::string fname = "";
+        if (g_jstrings.count(jstr) > 0) {
+            fname = g_jstrings[jstr];
+        }
+        
+        std::cout << "[JNI] MusicPlayer.loadFile(\"" << fname << "\")" << std::endl;
+        
+        if (g_music_source != 0) {
+            alSourceStop(g_music_source);
+            alSourcei(g_music_source, AL_BUFFER, 0);
+        }
+        
+        std::string wav_path = "assets/resources/music/music_" + fname;
+        size_t pos;
+        while ((pos = wav_path.find('-')) != std::string::npos) {
+            wav_path.replace(pos, 1, "_");
+        }
+        wav_path += ".wav";
+        
+        std::cout << "  -> Loading host music WAV: " << wav_path << std::endl;
+        
+        if (g_music_buffer == 0) {
+            alGenBuffers(1, &g_music_buffer);
+        }
+        
+        bool loaded = load_wav_to_buffer(wav_path, g_music_buffer);
+        if (loaded) {
+            if (g_music_source == 0) {
+                alGenSources(1, &g_music_source);
+            }
+            alSourcei(g_music_source, AL_BUFFER, g_music_buffer);
+            alSourcei(g_music_source, AL_LOOPING, g_music_looping ? AL_TRUE : AL_FALSE);
+            alSourcef(g_music_source, AL_GAIN, g_music_volume);
+            res = 1; // success
+        } else {
+            std::cerr << "  ⚠ Failed to load music WAV: " << wav_path << std::endl;
+            res = 0; // fail
+        }
+    } else {
+        res = 0; // return 0 like Vita port
+    }
+    
+    std::cout << "[JNI] CallBooleanMethodV(mid=0x" << std::hex << method_id << ") -> " << res << std::dec << std::endl;
+    emu->set_reg(0, res);
 }
 
 void bridge_CallIntMethodV(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
-    // R0=env, R1=object, R2=methodID, R3=va_list
     uint32_t obj = emu->get_reg(1);
     uint32_t method_id = emu->get_reg(2);
-    // ConsentStatus: 0=UNKNOWN, 1=NOT_REQUIRED, 2=OBTAINED, 3=REQUIRED
-    // Return OBTAINED so engine proceeds
-    if (method_id == 0x13180001) { // getPlatformConsentState -> reading consent status
-        std::cout << "[JNI] CallIntMethodV -> returning CONSENT_STATUS_OBTAINED (2)" << std::endl;
-        emu->set_reg(0, 2);
+    uint32_t res = 0;
+    if (method_id == 0x13180001) { // getPlatformConsentState
+        res = 0; // Return 0 (unknown) to trigger consent/age check flow in-game
     } else {
-        emu->set_reg(0, 0);
+        res = 0;
     }
+    std::cout << "[JNI] CallIntMethodV(mid=0x" << std::hex << method_id << ") -> " << res << std::dec << std::endl;
+    emu->set_reg(0, res);
 }
 
 void bridge_CallLongMethodV(void* emu_ptr) {
@@ -716,6 +938,46 @@ void bridge_CallLongMethodV(void* emu_ptr) {
 }
 
 void bridge_CallVoidMethodV(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t obj = emu->get_reg(1);
+    uint32_t method_id = emu->get_reg(2);
+    uint32_t va_list_ptr = emu->get_reg(3);
+    
+    std::cout << "[JNI] CallVoidMethodV(mid=0x" << std::hex << method_id << ")" << std::dec << std::endl;
+    
+    if (method_id == 0x13200001) { // play
+        std::cout << "[JNI] MusicPlayer.play()" << std::endl;
+        if (g_music_source != 0) {
+            alSourcePlay(g_music_source);
+        }
+    } else if (method_id == 0x13210001) { // pause
+        std::cout << "[JNI] MusicPlayer.pause()" << std::endl;
+        if (g_music_source != 0) {
+            alSourcePause(g_music_source);
+        }
+    } else if (method_id == 0x13220001) { // stop
+        std::cout << "[JNI] MusicPlayer.stop()" << std::endl;
+        if (g_music_source != 0) {
+            alSourceStop(g_music_source);
+        }
+    } else if (method_id == 0x13230001) { // setLooping
+        uint32_t looping = *(uint32_t*)(memory + va_list_ptr);
+        g_music_looping = (looping != 0);
+        std::cout << "[JNI] MusicPlayer.setLooping(" << g_music_looping << ")" << std::endl;
+        if (g_music_source != 0) {
+            alSourcei(g_music_source, AL_LOOPING, g_music_looping ? AL_TRUE : AL_FALSE);
+        }
+    } else if (method_id == 0x13240001) { // setVolume
+        // In ARM EABI, double inside va_list is 8-byte aligned.
+        // Reading it as double since float arguments are promoted to double in va_list.
+        double vol_d = *(double*)(memory + va_list_ptr);
+        g_music_volume = (float)vol_d;
+        std::cout << "[JNI] MusicPlayer.setVolume(" << g_music_volume << ")" << std::endl;
+        if (g_music_source != 0) {
+            alSourcef(g_music_source, AL_GAIN, g_music_volume);
+        }
+    }
 }
 
 void bridge_GetObjectClass(void* emu_ptr) {
@@ -751,12 +1013,16 @@ void bridge_CallStaticObjectMethodV(void* emu_ptr) {
 void bridge_CallStaticBooleanMethodV(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     uint32_t mid = emu->get_reg(2);
-    // Vita project: IS_AGE_KNOWN and GET_PLATFORM_CONSENT_STATE both return 1
-    if (mid == 0x13170001 || mid == 0x13180001) {
-        emu->set_reg(0, 1);
+    uint32_t res = 0;
+    if (mid == 0x13170001) { // isAgeKnown
+        res = 0; // Return 0 (false) so the user answers it in-game
+    } else if (mid == 0x13180001) { // getPlatformConsentState
+        res = 0; // Return 0 (false)
     } else {
-        emu->set_reg(0, 1);
+        res = 0;
     }
+    std::cout << "[JNI] CallStaticBooleanMethodV(mid=0x" << std::hex << mid << ") -> " << res << std::dec << std::endl;
+    emu->set_reg(0, res);
 }
 
 void bridge_CallStaticIntMethodV(void* emu_ptr) {
@@ -776,6 +1042,9 @@ void bridge_CallStaticFloatMethodV(void* emu_ptr) {
 }
 
 void bridge_CallStaticVoidMethodV(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t mid = emu->get_reg(2);
+    std::cout << "[JNI] CallStaticVoidMethodV(mid=0x" << std::hex << mid << ")" << std::dec << std::endl;
 }
 
 void bridge_GetStaticFieldID(void* emu_ptr) {
@@ -935,6 +1204,13 @@ void bridge_memchr_impl(void* emu_ptr) {
     uint32_t ptr = emu->get_reg(0);
     int c = (int)(emu->get_reg(1) & 0xFF);
     uint32_t n = emu->get_reg(2);
+    if (!emu->quiet_mode) {
+        std::cout << "[MEM] memchr(ptr=0x" << std::hex << ptr << ", c=" << c << ", n=" << std::dec << n << ")" << std::endl;
+    }
+    if (ptr == 0) {
+        emu->set_reg(0, 0);
+        return;
+    }
     const void* result = std::memchr(memory + ptr, c, n);
     if (result) {
         emu->set_reg(0, ptr + (uint32_t)((const uint8_t*)result - (memory + ptr)));
@@ -983,14 +1259,103 @@ void bridge_atoi(void* emu_ptr) {
 void bridge_atof(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
-    uint32_t str = emu->get_reg(0);
-    float f = (float)std::atof((const char*)(memory + str));
-    emu->set_reg(0, float_to_uint(f));
+    uint32_t str_ptr = emu->get_reg(0);
+    const char* str = (const char*)(memory + str_ptr);
+    float res = (float)std::atof(str);
+    if (std::isnan(res)) std::cout << "[Math] atof(\"" << str << "\") -> NaN!" << std::endl;
+    if (!emu->quiet_mode) std::cout << "[Math] atof(\"" << str << "\") -> " << res << std::endl;
+    emu->set_reg(0, float_to_uint(res));
 }
+
+#include <zlib.h>
 
 // --- File I/O Bridges ---
 static std::unordered_map<uint32_t, FILE*> g_file_handles;
+static std::unordered_map<uint32_t, gzFile> g_gz_handles;
 static uint32_t g_next_file_handle = 0x70000001;
+
+void bridge_lseek(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    int fd = emu->get_reg(0);
+    off_t offset = (off_t)emu->get_reg(1);
+    int whence = emu->get_reg(2);
+    
+    // Check if it's one of our asset fds or standard handles
+    if (g_file_handles.count(fd)) {
+        int res = fseek(g_file_handles[fd], offset, whence);
+        emu->set_reg(0, res == 0 ? ftell(g_file_handles[fd]) : -1);
+    } else {
+        off_t res = lseek(fd, offset, whence);
+        emu->set_reg(0, (uint32_t)res);
+    }
+}
+
+void bridge_gzdopen(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    int fd = emu->get_reg(0);
+    uint32_t mode_ptr = emu->get_reg(1);
+    const char* mode = (const char*)(memory + mode_ptr);
+    
+    std::cout << "[ZLIB] gzdopen(fd=" << fd << ", mode=\"" << mode << "\")";
+
+    int real_fd = fd;
+    if (g_file_handles.count(fd)) {
+        real_fd = fileno(g_file_handles[fd]);
+    }
+    
+    // Always dup so gzclose doesn't close our original asset/file handle
+    int new_fd = dup(real_fd);
+    gzFile gz = gzdopen(new_fd, mode);
+
+    if (gz) {
+        uint32_t handle = g_next_file_handle++;
+        g_gz_handles[handle] = gz;
+        std::cout << " -> handle 0x" << std::hex << handle << std::dec << std::endl;
+        emu->set_reg(0, handle);
+    } else {
+        std::cout << " -> FAILED" << std::endl;
+        if (new_fd >= 0) close(new_fd);
+        emu->set_reg(0, 0);
+    }
+}
+
+void bridge_gzread(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t handle = emu->get_reg(0);
+    uint32_t buf = emu->get_reg(1);
+    uint32_t len = emu->get_reg(2);
+    
+    if (g_gz_handles.count(handle)) {
+        int read = gzread(g_gz_handles[handle], memory + buf, len);
+        if (!emu->quiet_mode) {
+             std::cout << "[ZLIB] gzread(handle=0x" << std::hex << handle << ", len=" << std::dec << len << ") -> " << read << " bytes";
+             if (read < 0) {
+                 int errnum;
+                 const char* errmsg = gzerror(g_gz_handles[handle], &errnum);
+                 std::cout << " ERROR: " << errmsg << " (" << errnum << ")";
+             }
+             std::cout << std::endl;
+        }
+        emu->set_reg(0, (uint32_t)read);
+    } else {
+        std::cout << "[ZLIB] gzread(INVALID handle=0x" << std::hex << handle << ")" << std::endl;
+        emu->set_reg(0, (uint32_t)-1);
+    }
+}
+
+void bridge_gzclose(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t handle = emu->get_reg(0);
+    if (g_gz_handles.count(handle)) {
+        gzclose(g_gz_handles[handle]);
+        g_gz_handles.erase(handle);
+        emu->set_reg(0, 0);
+    } else {
+        emu->set_reg(0, (uint32_t)-1);
+    }
+}
 
 void bridge_fopen(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
@@ -1081,14 +1446,213 @@ void bridge_mkdir(void* emu_ptr) {
     uint32_t path_ptr = emu->get_reg(0);
     uint32_t mode = emu->get_reg(1);
     const char* path = (const char*)(memory + path_ptr);
+    std::cout << "[File] mkdir(\"" << path << "\", " << std::oct << mode << std::dec << ")" << std::endl;
     int result = mkdir(path, (mode_t)mode);
     emu->set_reg(0, (uint32_t)result);
 }
 
+void bridge_abort(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    std::cerr << "[FATAL] guest called abort() at PC=0x" << std::hex << emu->get_pc() << std::dec << std::endl;
+    exit(1);
+}
+
+void bridge_localtime(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t timer_ptr = emu->get_reg(0);
+    time_t timer;
+    if (timer_ptr) timer = (time_t)*(uint32_t*)(memory + timer_ptr);
+    else timer = time(NULL);
+    
+    struct tm* t = localtime(&timer);
+    // Use a fixed area in guest memory to return the struct tm
+    uint32_t tm_guest_ptr = 0x42000;
+    uint32_t* tm_guest = (uint32_t*)(memory + tm_guest_ptr);
+    tm_guest[0] = t->tm_sec;
+    tm_guest[1] = t->tm_min;
+    tm_guest[2] = t->tm_hour;
+    tm_guest[3] = t->tm_mday;
+    tm_guest[4] = t->tm_mon;
+    tm_guest[5] = t->tm_year;
+    tm_guest[6] = t->tm_wday;
+    tm_guest[7] = t->tm_yday;
+    tm_guest[8] = t->tm_isdst;
+    
+    emu->set_reg(0, tm_guest_ptr);
+}
+
+void bridge_fputs(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t str_ptr = emu->get_reg(0);
+    uint32_t handle = emu->get_reg(1);
+    const char* s = (const char*)(memory + str_ptr);
+    
+    // Check if handle matches __sF (stdout/stderr)
+    // In our loader, __sF is at globals_base (0x50000)
+    // __sF[0] = stdin, __sF[1] = stdout, __sF[2] = stderr
+    // Each FILE struct is usually ~84-148 bytes, but we just check the pointer.
+    if (handle == 0x50000 + 0 || handle == 0x50000 + 1*128 || handle == 0x50000 + 2*128) {
+         std::cout << "[guest log] " << s;
+         emu->set_reg(0, 0);
+         return;
+    }
+
+    if (g_file_handles.count(handle)) {
+        int res = fputs(s, g_file_handles[handle]);
+        emu->set_reg(0, res >= 0 ? 0 : -1);
+    } else {
+        // Fallback: if it looks like a low handle, it might be raw fd or someone's stdout
+        if (handle < 10) {
+            std::cout << "[guest log fd=" << handle << "] " << s;
+            emu->set_reg(0, 0);
+        } else {
+            emu->set_reg(0, -1);
+        }
+    }
+}
+
+void bridge_exidx(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t pc = emu->get_reg(0);
+    uint32_t pcount_ptr = emu->get_reg(1);
+    
+    // Mission 15: Return EXIDX for libswordigo.so
+    // .ARM.exidx at 0x00410ff8, size 0x19790 (from readelf)
+    // Base address is 0x1000000
+    uint32_t exidx_start = 0x1000000 + 0x410ff8;
+    uint32_t exidx_count = 0x19790 / 8;
+    
+    if (pcount_ptr) {
+        *(uint32_t*)(memory + pcount_ptr) = exidx_count;
+    }
+    emu->set_reg(0, exidx_start);
+}
+
 void bridge_stat(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
-    // Return -1 (file not found) as a safe default
-    emu->set_reg(0, (uint32_t)-1);
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t path_ptr = emu->get_reg(0);
+    uint32_t stat_buf_ptr = emu->get_reg(1);
+    const char* path = (const char*)(memory + path_ptr);
+    
+    struct stat st;
+    int result = stat(path, &st);
+    if (result == 0 && stat_buf_ptr != 0) {
+        // Android Bionic ARM32 struct stat layout (exactly 104 bytes)
+        *(uint64_t*)(memory + stat_buf_ptr + 0) = st.st_dev;     // st_dev (8 bytes)
+        *(uint32_t*)(memory + stat_buf_ptr + 8) = 0;             // __pad0 (4 bytes)
+        *(uint32_t*)(memory + stat_buf_ptr + 12) = st.st_ino;    // __st_ino (4 bytes)
+        *(uint32_t*)(memory + stat_buf_ptr + 16) = st.st_mode;   // st_mode (4 bytes)
+        *(uint32_t*)(memory + stat_buf_ptr + 20) = st.st_nlink;  // st_nlink (4 bytes)
+        *(uint32_t*)(memory + stat_buf_ptr + 24) = st.st_uid;    // st_uid (4 bytes)
+        *(uint32_t*)(memory + stat_buf_ptr + 28) = st.st_gid;    // st_gid (4 bytes)
+        *(uint64_t*)(memory + stat_buf_ptr + 32) = st.st_rdev;   // st_rdev (8 bytes)
+        *(uint32_t*)(memory + stat_buf_ptr + 40) = 0;            // __pad3 (4 bytes)
+        *(uint32_t*)(memory + stat_buf_ptr + 44) = 0;            // padding before st_size (4 bytes)
+        *(uint64_t*)(memory + stat_buf_ptr + 48) = st.st_size;   // st_size (8-byte aligned, 8 bytes)
+        *(uint32_t*)(memory + stat_buf_ptr + 56) = st.st_blksize;// st_blksize (4 bytes)
+        *(uint32_t*)(memory + stat_buf_ptr + 60) = 0;            // padding before st_blocks (4 bytes)
+        *(uint64_t*)(memory + stat_buf_ptr + 64) = st.st_blocks; // st_blocks (8-byte aligned, 8 bytes)
+        *(uint32_t*)(memory + stat_buf_ptr + 72) = st.st_atim.tv_sec;
+        *(uint32_t*)(memory + stat_buf_ptr + 76) = st.st_atim.tv_nsec;
+        *(uint32_t*)(memory + stat_buf_ptr + 80) = st.st_mtim.tv_sec;
+        *(uint32_t*)(memory + stat_buf_ptr + 84) = st.st_mtim.tv_nsec;
+        *(uint32_t*)(memory + stat_buf_ptr + 88) = st.st_ctim.tv_sec;
+        *(uint32_t*)(memory + stat_buf_ptr + 92) = st.st_ctim.tv_nsec;
+        *(uint64_t*)(memory + stat_buf_ptr + 96) = st.st_ino;    // st_ino (8-byte aligned, 8 bytes)
+    }
+    
+    if (!emu->quiet_mode) {
+        std::cout << "[File] stat(\"" << path << "\") -> " << result 
+                  << " (mode: 0x" << std::hex << st.st_mode << std::dec 
+                  << ", size: " << st.st_size << ")" << std::endl;
+    }
+    emu->set_reg(0, (uint32_t)result);
+}
+
+struct GuestDir {
+    DIR* host_dir;
+    uint32_t guest_dirent_addr;
+};
+
+void bridge_opendir(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t name_ptr = emu->get_reg(0);
+    
+    if (name_ptr == 0) {
+        emu->set_reg(0, 0); // null
+        return;
+    }
+    
+    const char* path = (const char*)(memory + name_ptr);
+    if (!emu->quiet_mode) {
+        std::cout << "[File] opendir(\"" << path << "\")" << std::endl;
+    }
+    
+    DIR* d = opendir(path);
+    if (!d) {
+        emu->set_reg(0, 0); // null
+        return;
+    }
+    
+    GuestDir* gd = new GuestDir();
+    gd->host_dir = d;
+    gd->guest_dirent_addr = g_guest_heap_ptr;
+    g_guest_heap_ptr += (280 + 7) & ~7; // allocate 280 bytes in guest heap for dirent struct
+    
+    uint32_t handle = g_next_handle++;
+    g_handle_to_ptr[handle] = gd;
+    
+    emu->set_reg(0, handle);
+}
+
+void bridge_readdir(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t handle = emu->get_reg(0);
+    
+    if (g_handle_to_ptr.count(handle) == 0) {
+        emu->set_reg(0, 0); // null
+        return;
+    }
+    
+    GuestDir* gd = (GuestDir*)g_handle_to_ptr[handle];
+    struct dirent* de = readdir(gd->host_dir);
+    if (!de) {
+        emu->set_reg(0, 0); // null
+        return;
+    }
+    
+    uint32_t addr = gd->guest_dirent_addr;
+    *(uint64_t*)(memory + addr + 0) = de->d_ino;
+    *(uint64_t*)(memory + addr + 8) = de->d_off;
+    *(uint16_t*)(memory + addr + 16) = de->d_reclen;
+    *(uint8_t*)(memory + addr + 18) = de->d_type;
+    std::strncpy((char*)(memory + addr + 19), de->d_name, 256);
+    
+    emu->set_reg(0, addr);
+}
+
+void bridge_closedir(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t handle = emu->get_reg(0);
+    
+    if (g_handle_to_ptr.count(handle) == 0) {
+        emu->set_reg(0, -1); // error
+        return;
+    }
+    
+    GuestDir* gd = (GuestDir*)g_handle_to_ptr[handle];
+    int res = closedir(gd->host_dir);
+    
+    delete gd;
+    g_handle_to_ptr.erase(handle);
+    
+    emu->set_reg(0, res);
 }
 
 // --- printf / logging ---
@@ -1137,37 +1701,42 @@ void bridge_sprintf(void* emu_ptr) {
     emu->set_reg(0, (uint32_t)std::strlen((char*)(memory + buf)));
 }
 
-// --- OpenAL Stubs ---
+// --- OpenAL Stubs (Now Real wrappers) ---
+static ALCdevice* g_alc_device = nullptr;
+static ALCcontext* g_alc_context = nullptr;
+
 void bridge_alcOpenDevice(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
-    emu->set_reg(0, 0xA1C00001); // Fake device handle
+    g_alc_device = alcOpenDevice(nullptr);
+    emu->set_reg(0, g_alc_device ? 1 : 0);
 }
 
 void bridge_alcCreateContext(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
-    emu->set_reg(0, 0xA1C00002); // Fake context handle
+    g_alc_context = alcCreateContext(g_alc_device, nullptr);
+    emu->set_reg(0, g_alc_context ? 2 : 0);
 }
 
 void bridge_alcMakeContextCurrent(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
-    emu->set_reg(0, 1); // ALC_TRUE
+    ALCboolean res = alcMakeContextCurrent(g_alc_context);
+    emu->set_reg(0, res ? 1 : 0);
 }
 
 void bridge_alGetError(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
-    emu->set_reg(0, 0); // AL_NO_ERROR
+    emu->set_reg(0, alGetError());
 }
 
 void bridge_alGenSources(void* emu_ptr) {
-    // alGenSources(n, sources) - fill with fake source IDs
     Emulator* emu = (Emulator*)emu_ptr;
     uint8_t* memory = emu->get_memory_base();
     uint32_t n = emu->get_reg(0);
     uint32_t sources_ptr = emu->get_reg(1);
-    static uint32_t next_source = 1;
-    for (uint32_t i = 0; i < n && i < 64; i++) {
-        *(uint32_t*)(memory + sources_ptr + i * 4) = next_source++;
-    }
+    
+    std::vector<ALuint> host_sources(n);
+    alGenSources(n, host_sources.data());
+    std::memcpy(memory + sources_ptr, host_sources.data(), n * sizeof(ALuint));
 }
 
 void bridge_alGenBuffers(void* emu_ptr) {
@@ -1175,14 +1744,163 @@ void bridge_alGenBuffers(void* emu_ptr) {
     uint8_t* memory = emu->get_memory_base();
     uint32_t n = emu->get_reg(0);
     uint32_t buffers_ptr = emu->get_reg(1);
-    static uint32_t next_buffer = 0x1000;
-    for (uint32_t i = 0; i < n && i < 64; i++) {
-        *(uint32_t*)(memory + buffers_ptr + i * 4) = next_buffer++;
-    }
+    
+    std::vector<ALuint> host_buffers(n);
+    alGenBuffers(n, host_buffers.data());
+    std::memcpy(memory + buffers_ptr, host_buffers.data(), n * sizeof(ALuint));
+}
+
+void bridge_alSourcePlay(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t source = emu->get_reg(0);
+    alSourcePlay(source);
+}
+
+void bridge_alSourceStop(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t source = emu->get_reg(0);
+    alSourceStop(source);
+}
+
+void bridge_alSourcePause(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t source = emu->get_reg(0);
+    alSourcePause(source);
+}
+
+void bridge_alSourcei(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t source = emu->get_reg(0);
+    uint32_t param = emu->get_reg(1);
+    uint32_t value = emu->get_reg(2);
+    alSourcei(source, param, value);
+}
+
+void bridge_alSourcef(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t source = emu->get_reg(0);
+    uint32_t param = emu->get_reg(1);
+    uint32_t val_i = emu->get_reg(2);
+    float val_f;
+    std::memcpy(&val_f, &val_i, 4);
+    alSourcef(source, param, val_f);
+}
+
+void bridge_alSource3f(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t source = emu->get_reg(0);
+    uint32_t param = emu->get_reg(1);
+    uint32_t v1_i = emu->get_reg(2);
+    uint32_t v2_i = emu->get_reg(3);
+    uint32_t v3_i = *(uint32_t*)(memory + emu->get_reg(13)); // SP
+    float v1, v2, v3;
+    std::memcpy(&v1, &v1_i, 4);
+    std::memcpy(&v2, &v2_i, 4);
+    std::memcpy(&v3, &v3_i, 4);
+    alSource3f(source, param, v1, v2, v3);
+}
+
+void bridge_alBufferData(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t buffer = emu->get_reg(0);
+    uint32_t format = emu->get_reg(1);
+    uint32_t data_ptr = emu->get_reg(2);
+    uint32_t size = emu->get_reg(3);
+    uint32_t freq = *(uint32_t*)(memory + emu->get_reg(13)); // SP
+    
+    alBufferData(buffer, format, memory + data_ptr, size, freq);
+}
+
+void bridge_alSourceQueueBuffers(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t source = emu->get_reg(0);
+    uint32_t nb = emu->get_reg(1);
+    uint32_t buffers_ptr = emu->get_reg(2);
+    
+    std::vector<ALuint> host_buffers(nb);
+    std::memcpy(host_buffers.data(), memory + buffers_ptr, nb * sizeof(ALuint));
+    alSourceQueueBuffers(source, nb, host_buffers.data());
+}
+
+void bridge_alSourceUnqueueBuffers(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t source = emu->get_reg(0);
+    uint32_t nb = emu->get_reg(1);
+    uint32_t buffers_ptr = emu->get_reg(2);
+    
+    std::vector<ALuint> host_buffers(nb);
+    alSourceUnqueueBuffers(source, nb, host_buffers.data());
+    std::memcpy(memory + buffers_ptr, host_buffers.data(), nb * sizeof(ALuint));
+}
+
+void bridge_alGetSourcei(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t source = emu->get_reg(0);
+    uint32_t param = emu->get_reg(1);
+    uint32_t value_ptr = emu->get_reg(2);
+    
+    ALint host_val = 0;
+    alGetSourcei(source, param, &host_val);
+    *(ALint*)(memory + value_ptr) = host_val;
+}
+
+void bridge_alDeleteSources(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t n = emu->get_reg(0);
+    uint32_t sources_ptr = emu->get_reg(1);
+    
+    std::vector<ALuint> host_sources(n);
+    std::memcpy(host_sources.data(), memory + sources_ptr, n * sizeof(ALuint));
+    alDeleteSources(n, host_sources.data());
+}
+
+void bridge_alDeleteBuffers(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t n = emu->get_reg(0);
+    uint32_t buffers_ptr = emu->get_reg(1);
+    
+    std::vector<ALuint> host_buffers(n);
+    std::memcpy(host_buffers.data(), memory + buffers_ptr, n * sizeof(ALuint));
+    alDeleteBuffers(n, host_buffers.data());
+}
+
+void bridge_alListenerf(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t param = emu->get_reg(0);
+    uint32_t val_i = emu->get_reg(1);
+    float val_f;
+    std::memcpy(&val_f, &val_i, 4);
+    alListenerf(param, val_f);
+}
+
+void bridge_alListener3f(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t param = emu->get_reg(0);
+    uint32_t v1_i = emu->get_reg(1);
+    uint32_t v2_i = emu->get_reg(2);
+    uint32_t v3_i = emu->get_reg(3);
+    float v1, v2, v3;
+    std::memcpy(&v1, &v1_i, 4);
+    std::memcpy(&v2, &v2_i, 4);
+    std::memcpy(&v3, &v3_i, 4);
+    alListener3f(param, v1, v2, v3);
+}
+
+void bridge_alDistanceModel(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t distanceModel = emu->get_reg(0);
+    alDistanceModel(distanceModel);
 }
 
 void bridge_al_noop(void* emu_ptr) {
-    // Generic no-op for AL calls that don't need return values
+    // Generic no-op
 }
 
 // --- GLES Real Bridge Functions ---
@@ -1281,11 +1999,13 @@ void bridge_gl_viewport(void* emu_ptr) {
     }
 }
 
-// --- Phase 2: Matrix Pipeline ---
+// Track current matrix mode so we can apply correct fallback for zero matrices
+static GLenum g_current_matrix_mode = GL_MODELVIEW;
 
 void bridge_gl_matrix_mode(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.matrix_ops++;
+    g_current_matrix_mode = (GLenum)emu->get_reg(0);
     GL_DIAG("glMatrixMode(0x%x) %s", emu->get_reg(0), emu->get_reg(0)==0x1701?"PROJECTION":emu->get_reg(0)==0x1700?"MODELVIEW":"OTHER");
     if (g_display_active) {
         glMatrixMode(emu->get_reg(0));
@@ -1293,6 +2013,8 @@ void bridge_gl_matrix_mode(void* emu_ptr) {
 }
 
 void bridge_gl_load_identity(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    GL_DIAG("glLoadIdentity()");
     g_frame_stats.matrix_ops++;
     if (g_display_active) glLoadIdentity();
 }
@@ -1303,16 +2025,68 @@ void bridge_gl_load_matrixf(void* emu_ptr) {
     uint8_t* memory = emu->get_memory_base();
     uint32_t ptr = emu->get_reg(0);
     const GLfloat* m = (const GLfloat*)(memory + ptr);
+    
+    bool has_bad = false;
+    for (int i = 0; i < 16; i++) {
+        if (std::isnan(m[i]) || std::isinf(m[i])) {
+            has_bad = true;
+            break;
+        }
+    }
+    
+    bool is_zero = true;
+    for (int i = 0; i < 16; i++) {
+        if (m[i] != 0.0f) {
+            is_zero = false;
+            break;
+        }
+    }
+    
+    // Silently fix zero matrices - they happen during projection setup before
+    // the engine's tanf-based projection is fully computed.
+    // Log only NaN/Inf (real bugs), not zero (expected during boot).
+    if (is_zero) {
+        static uint32_t zero_matrix_count = 0;
+        if ((++zero_matrix_count <= 3) || (zero_matrix_count % 10000 == 0)) {
+            uint32_t lr = emu->get_lr();
+            std::cout << "[MATRIX] Zero matrix #" << zero_matrix_count 
+                      << " (using fallback) LR=0x" << std::hex << lr << std::dec << std::endl;
+        }
+        if (g_display_active) {
+            // For projection: use ortho matching game viewport; for modelview: identity
+            if (g_current_matrix_mode == GL_PROJECTION) {
+                glOrtho(0, 800, 480, 0, -1, 1);  // Game's 2D UI space
+            } else {
+                glLoadIdentity();
+            }
+        } else {
+            GLfloat identity[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+            memcpy((void*)m, identity, 64);
+        }
+        return;
+    }
+    
+    if (has_bad) {
+        uint32_t lr = emu->get_lr();
+        static uint32_t nan_count = 0;
+        if ((++nan_count <= 3) || (nan_count % 1000 == 0)) {
+            std::cout << "[MATRIX] NaN/Inf #" << nan_count << " at LR=0x" << std::hex << lr << std::dec
+                      << " [" << m[0] << " " << m[1] << " / " << m[4] << " " << m[5] << "]" << std::endl;
+        }
+        if (g_display_active) {
+            if (g_current_matrix_mode == GL_PROJECTION) {
+                glOrtho(0, 800, 480, 0, -1, 1);
+            } else {
+                glLoadIdentity();
+            }
+        }
+        return;
+    }
+
     log_matrix_once(emu, ptr, m);
     GL_DIAG("glLoadMatrixf(@0x%x) [%.2f %.2f %.2f %.2f / %.2f %.2f %.2f %.2f / ...]", ptr, m[0],m[1],m[2],m[3],m[4],m[5],m[6],m[7]);
     if (g_display_active) {
-        // Fix: If matrix is zeroed, use identity to prevent black screen
-        if (m[0] == 0.0f && m[5] == 0.0f && m[10] == 0.0f) {
-             GL_DIAG("  [FIX] Detected zero matrix, using identity");
-             glLoadIdentity();
-        } else {
-             glLoadMatrixf(m);
-        }
+        glLoadMatrixf(m);
     }
 }
 
@@ -1320,22 +2094,45 @@ void bridge_gl_mult_matrixf(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     g_frame_stats.matrix_ops++;
     uint8_t* memory = emu->get_memory_base();
-    const GLfloat* m = (const GLfloat*)(memory + emu->get_reg(0));
-    GL_DIAG("glMultMatrixf(@0x%x) [%.2f %.2f %.2f %.2f / ...]", emu->get_reg(0), m[0],m[1],m[2],m[3]);
+    uint32_t ptr = emu->get_reg(0);
+    const GLfloat* m = (const GLfloat*)(memory + ptr);
+    
+    bool has_bad = false;
+    for (int i = 0; i < 16; i++) {
+        if (std::isnan(m[i]) || std::isinf(m[i])) {
+            has_bad = true;
+            break;
+        }
+    }
+    
+    if (has_bad || (g_gl_diag_enabled && g_gl_diag_frame < 3)) {
+        std::cout << "[MATRIX] glMultMatrixf" << (has_bad ? " BAD!" : "") << " at LR=0x" << std::hex << emu->get_lr() << std::dec << std::endl;
+        std::cout << "  [" << m[0] << " " << m[4] << " " << m[8] << " " << m[12] << " / "
+                  << m[1] << " " << m[5] << " " << m[9] << " " << m[13] << " / "
+                  << m[2] << " " << m[6] << " " << m[10] << " " << m[14] << " / "
+                  << m[3] << " " << m[7] << " " << m[11] << " " << m[15] << "]" << std::endl;
+    }
+
     if (g_display_active) {
         glMultMatrixf(m);
     }
 }
 
+static int g_gl_matrix_stack_depth = 0;
+
 void bridge_gl_push_matrix(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    g_gl_matrix_stack_depth++;
+    GL_DIAG("glPushMatrix() depth=%d", g_gl_matrix_stack_depth);
     g_frame_stats.matrix_ops++;
-    GL_DIAG("glPushMatrix()");
     if (g_display_active) glPushMatrix();
 }
 
 void bridge_gl_pop_matrix(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    g_gl_matrix_stack_depth--;
+    GL_DIAG("glPopMatrix() depth=%d", g_gl_matrix_stack_depth);
     g_frame_stats.matrix_ops++;
-    GL_DIAG("glPopMatrix()");
     if (g_display_active) glPopMatrix();
 }
 
@@ -1355,6 +2152,9 @@ void bridge_gl_orthof(void* emu_ptr) {
     memcpy(&n, memory + sp, 4);
     memcpy(&f, memory + sp + 4, 4);
     GL_DIAG("glOrthof(l=%f, r=%f, b=%f, t=%f, n=%f, f=%f)", l, r_, b, t, n, f);
+    if (l == r_ || b == t || n == f) {
+        std::cout << "[GL] glOrthof with zero range detected! l=" << l << " r=" << r_ << " b=" << b << " t=" << t << " n=" << n << " f=" << f << std::endl;
+    }
     if (g_display_active) {
         glOrtho(l, r_, b, t, n, f);
     }
@@ -1454,21 +2254,7 @@ void bridge_gl_draw_arrays(void* emu_ptr) {
     }
 
     if (g_display_active) {
-        if (g_gl_force_identity) {
-            glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); glOrtho(0, 800, 480, 0, -1, 1);
-            glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
-        }
-        if (g_gl_force_white) {
-            glDisable(GL_TEXTURE_2D);
-            glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-        }
-
         glDrawArrays(mode, first, count);
-
-        if (g_gl_force_identity) {
-            glMatrixMode(GL_PROJECTION); glPopMatrix();
-            glMatrixMode(GL_MODELVIEW); glPopMatrix();
-        }
     }
 }
 
@@ -1492,21 +2278,7 @@ void bridge_gl_draw_elements(void* emu_ptr) {
 
     if (g_display_active) {
         uint8_t* memory = emu->get_memory_base();
-        if (g_gl_force_identity) {
-            glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); glOrtho(0, 800, 480, 0, -1, 1);
-            glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
-        }
-        if (g_gl_force_white) {
-            glDisable(GL_TEXTURE_2D);
-            glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-        }
-
         glDrawElements(mode, count, type, (const void*)(memory + indices_ptr));
-
-        if (g_gl_force_identity) {
-            glMatrixMode(GL_PROJECTION); glPopMatrix();
-            glMatrixMode(GL_MODELVIEW); glPopMatrix();
-        }
     }
 }
 
@@ -1830,15 +2602,23 @@ void bridge_eglGetProcAddress(void* emu_ptr) {
     uint8_t* memory = emu->get_memory_base();
     uint32_t name_ptr = emu->get_reg(0);
     const char* procname = name_ptr ? (const char*)(memory + name_ptr) : "";
-    EGL_LOG("eglGetProcAddress(\"%s\")", procname);
+    printf("[EGL] eglGetProcAddress(\"%s\")\n", procname);
+    fflush(stdout);
     uint32_t addr = 0;
     if (emu->bridge && procname[0]) {
         addr = emu->bridge->lookup_proc_address(procname);
     }
     if (addr) {
-        EGL_LOG("  -> bridge 0x%x (%s)", addr, emu->bridge->get_name(addr).c_str());
+        printf("[EGL]   -> bridge 0x%x (%s)\n", addr, emu->bridge->get_name(addr).c_str());
+        fflush(stdout);
     } else {
-        EGL_LOG("  -> NULL (no bridge handler)");
+        // Log all EGL requests even if no handler, to see what's missing
+        static std::unordered_set<std::string> warned_egl;
+        if (!warned_egl.count(procname)) {
+            printf("[EGL]   -> NULL (no bridge handler)\n");
+            fflush(stdout);
+            warned_egl.insert(procname);
+        }
     }
     emu->set_reg(0, addr);
 }
@@ -1915,16 +2695,17 @@ void bridge_glGetIntegerv(void* emu_ptr) {
 
 void bridge_glGetString(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
-    // Return a pointer to a string in guest memory
     static bool initialized = false;
     uint8_t* memory = emu->get_memory_base();
     if (!initialized) {
         strcpy((char*)(memory + 0x40000), "OpenGL ES 2.0 (Swordigo Desktop)");
         strcpy((char*)(memory + 0x40100), "Swordigo Desktop Emulator");
-        strcpy((char*)(memory + 0x40200), "GL_OES_texture_npot GL_OES_compressed_ETC1_RGB8_texture");
+        // Include PVRTC extension for PowerVR texture support
+        strcpy((char*)(memory + 0x40200), "GL_OES_texture_npot GL_OES_compressed_ETC1_RGB8_texture GL_IMG_texture_compression_pvrtc");
         initialized = true;
     }
     uint32_t name = emu->get_reg(0);
+    std::cout << "[GL] glGetString(0x" << std::hex << name << std::dec << ")" << std::endl;
     switch (name) {
         case 0x1F00: emu->set_reg(0, 0x40100); break; // GL_VENDOR
         case 0x1F01: emu->set_reg(0, 0x40100); break; // GL_RENDERER
@@ -1990,8 +2771,120 @@ void bridge_gl_framebuffer_status(void* emu_ptr) {
 }
 
 
-// --- Misc stubs ---
-// __errno returns a pointer to the errno variable in guest memory
+void bridge_matrix4_mul(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    const float* a = (const float*)(memory + emu->get_reg(0));
+    const float* b = (const float*)(memory + emu->get_reg(1));
+    float* out = (float*)(memory + emu->get_reg(2));
+
+    float res[16];
+    for (int i = 0; i < 4; i++) { // column
+        for (int j = 0; j < 4; j++) { // row
+            float sum = 0;
+            for (int k = 0; k < 4; k++) {
+                sum += a[k * 4 + j] * b[i * 4 + k];
+            }
+            res[i * 4 + j] = sum;
+        }
+    }
+    
+    bool bad_a = false, bad_b = false, bad_res = false;
+    for (int i = 0; i < 16; i++) {
+        if (std::isnan(a[i]) || std::isinf(a[i])) bad_a = true;
+        if (std::isnan(b[i]) || std::isinf(b[i])) bad_b = true;
+        if (std::isnan(res[i]) || std::isinf(res[i])) bad_res = true;
+    }
+
+    if (bad_res && !bad_a && !bad_b) {
+        std::cout << "[MATRIX] Matrix4Mul CREATED NaNs! LR=0x" << std::hex << emu->get_lr() << std::dec << std::endl;
+    }
+    
+    memcpy(out, res, 64);
+}
+
+// -------------------------------------------------------------------------
+// Matrix4::Ortho spy — intercepts the engine's own ortho projection setup.
+// ARM calling convention: r0=this(Matrix4*), r1=left, r2=right, r3=bottom,
+// [sp+0]=top, [sp+4]=near, [sp+8]=far (float args via integer regs/stack).
+// We log the params and compute the matrix natively so it's always correct.
+// -------------------------------------------------------------------------
+void bridge_matrix4_ortho(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t dst_ptr = emu->get_reg(0);  // Matrix4* this
+    float left   = uint_to_float(emu->get_reg(1));
+    float right  = uint_to_float(emu->get_reg(2));
+    float bottom = uint_to_float(emu->get_reg(3));
+    uint32_t sp  = emu->get_reg(13);
+    float top    = uint_to_float(*(uint32_t*)(memory + sp));
+    float near_  = uint_to_float(*(uint32_t*)(memory + sp + 4));
+    float far_   = uint_to_float(*(uint32_t*)(memory + sp + 8));
+
+    static int ortho_count = 0;
+    ortho_count++;
+    std::cout << "[PROJ] Matrix4::Ortho #" << ortho_count
+              << " l=" << left << " r=" << right
+              << " b=" << bottom << " t=" << top
+              << " n=" << near_ << " f=" << far_ << std::endl;
+
+    // Compute standard OpenGL ortho matrix in column-major layout
+    // to write into guest memory at dst_ptr
+    if (dst_ptr && dst_ptr < (uint32_t)(0xC0000000)) {
+        float tx = -(right + left) / (right - left);
+        float ty = -(top + bottom) / (top - bottom);
+        float tz = -(far_ + near_) / (far_ - near_);
+        float sx =  2.0f / (right - left);
+        float sy =  2.0f / (top - bottom);
+        float sz = -2.0f / (far_ - near_);
+        // Column-major layout (OpenGL convention)
+        float m[16] = {
+            sx,   0.0f, 0.0f, 0.0f,
+            0.0f, sy,   0.0f, 0.0f,
+            0.0f, 0.0f, sz,   0.0f,
+            tx,   ty,   tz,   1.0f
+        };
+        memcpy(memory + dst_ptr, m, 64);
+    }
+    // Return this (r0 unchanged)
+}
+
+// -------------------------------------------------------------------------
+// Matrix4::PerspectiveFov spy — logs FOV params for 3D projection.
+// ARM: r0=this(Matrix4*), r1=fov(deg), r2=aspect, r3=near, [sp]=far
+// -------------------------------------------------------------------------
+void bridge_matrix4_perspective(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t dst_ptr = emu->get_reg(0);
+    float fov    = uint_to_float(emu->get_reg(1));  // in degrees
+    float aspect = uint_to_float(emu->get_reg(2));
+    float near_  = uint_to_float(emu->get_reg(3));
+    uint32_t sp  = emu->get_reg(13);
+    float far_   = uint_to_float(*(uint32_t*)(memory + sp));
+
+    static int persp_count = 0;
+    persp_count++;
+    std::cout << "[PROJ] Matrix4::PerspectiveFov #" << persp_count
+              << " fov=" << fov << " aspect=" << aspect
+              << " near=" << near_ << " far=" << far_ << std::endl;
+
+    // Compute standard perspective matrix
+    if (dst_ptr && dst_ptr < (uint32_t)(0xC0000000)) {
+        float rad = fov * (3.14159265f / 180.0f);
+        float f = 1.0f / std::tan(rad / 2.0f);
+        float range = near_ - far_;
+        float m[16] = {
+            f / aspect, 0.0f, 0.0f,                         0.0f,
+            0.0f,       f,    0.0f,                         0.0f,
+            0.0f,       0.0f, (near_ + far_) / range,       -1.0f,
+            0.0f,       0.0f, (2.0f * near_ * far_) / range, 0.0f
+        };
+        memcpy(memory + dst_ptr, m, 64);
+    }
+}
+
+
 static const uint32_t GUEST_ERRNO_ADDR = 0x41000; // Reserved area
 void bridge_errno(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
@@ -2020,6 +2913,29 @@ void bridge_cxa_guard(void* emu_ptr) {
 
 void bridge_pthread_mutex(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
+    emu->set_reg(0, 0); // success
+}
+
+void bridge_pthread_once(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    uint32_t once_control_ptr = emu->get_reg(0);
+    uint32_t init_routine = emu->get_reg(1);
+
+    if (once_control_ptr == 0) {
+        emu->set_reg(0, -1); // EINVAL
+        return;
+    }
+
+    uint32_t once_val = *(uint32_t*)(memory + once_control_ptr);
+    if (once_val != 2) { // not initialized
+        // Mark as initialized/completed to avoid recursion/reentry issues
+        *(uint32_t*)(memory + once_control_ptr) = 2;
+        if (init_routine != 0) {
+            std::cout << "[Bridge] pthread_once calling init_routine at 0x" << std::hex << init_routine << std::dec << std::endl;
+            emu->call(init_routine, {});
+        }
+    }
     emu->set_reg(0, 0); // success
 }
 
@@ -2125,17 +3041,20 @@ void JniBridge::init_standard_bridges() {
 
     register_handler("cosf", bridge_cosf);
     register_handler("sinf", bridge_sinf);
-    register_handler("tanf", bridge_tanf);
     register_handler("acosf", bridge_acosf);
     register_handler("asinf", bridge_asinf);
     register_handler("atanf", bridge_atanf);
     register_handler("atan2f", bridge_atan2f);
-    register_handler("roundf", bridge_roundf);
+    register_handler("tanf", bridge_tanf);
+    register_handler("tan", bridge_tan);
+    register_handler("sqrtf", bridge_sqrtf);
     register_handler("floorf", bridge_floorf);
     register_handler("ceilf", bridge_ceilf);
-    register_handler("sqrtf", bridge_sqrtf);
+    register_handler("fmodf", bridge_fmodf);
+    register_handler("roundf", bridge_roundf);
 
     register_handler("powf", bridge_powf);
+    register_handler("pow", bridge_pow);
     register_handler("sincosf", bridge_sincosf);
 
     // File I/O
@@ -2145,13 +3064,29 @@ void JniBridge::init_standard_bridges() {
     register_handler("fwrite", bridge_fwrite);
     register_handler("fseek", bridge_fseek);
     register_handler("ftell", bridge_ftell);
+    register_handler("lseek", bridge_lseek);
+    register_handler("gzdopen", bridge_gzdopen);
+    register_handler("gzread", bridge_gzread);
+    register_handler("gzclose", bridge_gzclose);
 
     // Directory / system
     register_handler("mkdir", bridge_mkdir);
     register_handler("stat", bridge_stat);
+    register_handler("opendir", bridge_opendir);
+    register_handler("readdir", bridge_readdir);
+    register_handler("closedir", bridge_closedir);
+    register_handler("C_Matrix4Mul", bridge_matrix4_mul);
+    register_handler("_Z12C_Matrix4MulPKfS0_Pf", bridge_matrix4_mul);
+
+    // Intercept engine's internal matrix projection functions so they always
+    // produce correct results regardless of VFP emulation accuracy.
+    register_handler("_ZN5Caver7Matrix45OrthoEffffff",        bridge_matrix4_ortho);
+    register_handler("_ZN5Caver7Matrix414PerspectiveFovEffff", bridge_matrix4_perspective);
+
 
     // Printf / logging
     register_handler("printf", bridge_printf);
+    register_handler("fputs", bridge_fputs);
     register_handler("snprintf", bridge_snprintf);
     register_handler("sprintf", bridge_sprintf);
     register_handler("__android_log_print", bridge_android_log_print);
@@ -2159,6 +3094,7 @@ void JniBridge::init_standard_bridges() {
     register_handler("__android_log_vprint", bridge_android_log_print);
 
     // Misc libc
+    register_handler("abort", bridge_abort);
     register_handler("__errno", bridge_errno);
     register_handler("__cxa_atexit", bridge_cxa_atexit);
     register_handler("__cxa_finalize", bridge_cxa_atexit);
@@ -2168,8 +3104,10 @@ void JniBridge::init_standard_bridges() {
     register_handler("__google_potentially_blocking_region_begin", bridge_google_blocking);
     register_handler("__google_potentially_blocking_region_end", bridge_google_blocking);
     register_handler("time", bridge_time);
+    register_handler("localtime", bridge_localtime);
     register_handler("clock_gettime", bridge_clock_gettime);
     register_handler("gettimeofday", bridge_gettimeofday);
+    register_handler("__gnu_Unwind_Find_exidx", bridge_exidx);
 
     // pthreads
     register_handler("pthread_mutex_init", bridge_pthread_mutex);
@@ -2183,7 +3121,7 @@ void JniBridge::init_standard_bridges() {
     register_handler("pthread_cond_destroy", bridge_pthread_cond);
     register_handler("pthread_create", bridge_pthread_create);
     register_handler("pthread_self", bridge_pthread_self);
-    register_handler("pthread_once", bridge_pthread_mutex);
+    register_handler("pthread_once", bridge_pthread_once);
 
     // JNI
     register_handler("FindClass", bridge_FindClass);
@@ -2246,21 +3184,21 @@ void JniBridge::init_standard_bridges() {
     register_handler("alGetError", bridge_alGetError);
     register_handler("alGenSources", bridge_alGenSources);
     register_handler("alGenBuffers", bridge_alGenBuffers);
-    register_handler("alSourcePlay", bridge_al_noop);
-    register_handler("alSourceStop", bridge_al_noop);
-    register_handler("alSourcePause", bridge_al_noop);
-    register_handler("alSourcei", bridge_al_noop);
-    register_handler("alSourcef", bridge_al_noop);
-    register_handler("alSource3f", bridge_al_noop);
-    register_handler("alBufferData", bridge_al_noop);
-    register_handler("alSourceQueueBuffers", bridge_al_noop);
-    register_handler("alSourceUnqueueBuffers", bridge_al_noop);
-    register_handler("alGetSourcei", bridge_al_noop);
-    register_handler("alDeleteSources", bridge_al_noop);
-    register_handler("alDeleteBuffers", bridge_al_noop);
-    register_handler("alListenerf", bridge_al_noop);
-    register_handler("alListener3f", bridge_al_noop);
-    register_handler("alDistanceModel", bridge_al_noop);
+    register_handler("alSourcePlay", bridge_alSourcePlay);
+    register_handler("alSourceStop", bridge_alSourceStop);
+    register_handler("alSourcePause", bridge_alSourcePause);
+    register_handler("alSourcei", bridge_alSourcei);
+    register_handler("alSourcef", bridge_alSourcef);
+    register_handler("alSource3f", bridge_alSource3f);
+    register_handler("alBufferData", bridge_alBufferData);
+    register_handler("alSourceQueueBuffers", bridge_alSourceQueueBuffers);
+    register_handler("alSourceUnqueueBuffers", bridge_alSourceUnqueueBuffers);
+    register_handler("alGetSourcei", bridge_alGetSourcei);
+    register_handler("alDeleteSources", bridge_alDeleteSources);
+    register_handler("alDeleteBuffers", bridge_alDeleteBuffers);
+    register_handler("alListenerf", bridge_alListenerf);
+    register_handler("alListener3f", bridge_alListener3f);
+    register_handler("alDistanceModel", bridge_alDistanceModel);
 
     // GLES real bridge functions
     register_handler("glViewport", bridge_gl_viewport);
@@ -2338,10 +3276,16 @@ void JniBridge::init_standard_bridges() {
     register_handler("glLightModelf", bridge_gl_noop);
     register_handler("glLightModelfv", bridge_gl_noop);
     register_handler("glPointSize", bridge_gl_noop);
+    register_handler("glCullFace", bridge_gl_noop);
     register_handler("glHint", bridge_gl_noop);
     register_handler("glFlush", bridge_gl_flush);
     register_handler("glFinish", bridge_gl_finish);
     register_handler("glReadPixels", bridge_gl_noop);
+    register_handler("glClearStencil", bridge_gl_noop);
+    register_handler("glColor4ub", bridge_gl_noop);
+    register_handler("glTexEnvi", bridge_gl_noop);
+    register_handler("glTexEnvfv", bridge_gl_noop);
+    register_handler("glTexParameterf", bridge_gl_tex_parameterf);
 
     // EGL
     register_handler("eglGetDisplay", bridge_gl_noop);
