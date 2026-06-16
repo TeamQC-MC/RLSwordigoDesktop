@@ -68,6 +68,7 @@ public:
     uint32_t lookup_proc_address(const std::string& name);
     
     void register_handler(const std::string& name, BridgeHandler handler);
+    void register_guest_handler(const std::string& name, uint32_t guest_addr);
     void call_handler(uint32_t address, void* emu);
 
     // Initialize standard GLES/AL/Bionic bridges
@@ -76,8 +77,8 @@ public:
 private:
     std::map<std::string, uint32_t> name_to_addr;
     std::map<uint32_t, BridgeFunction> addr_to_func;
+    std::map<uint32_t, uint32_t> bridge_to_guest;
     uint32_t next_addr;
 };
 
 #endif
-

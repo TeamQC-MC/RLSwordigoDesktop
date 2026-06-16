@@ -4,13 +4,19 @@
 #include <iostream>
 #include <cstring>
 #include <algorithm>
+#include <unordered_set>
 
 ElfLoader::ElfLoader(uint8_t* guest_mem_base, uint32_t guest_mem_size) 
     : guest_base(guest_mem_base), guest_limit(guest_mem_size) {}
 
 int ElfLoader::resolve_all_to_bridge(so_module* mod, JniBridge* bridge, uint32_t globals_base) {
+    return resolve_multi(mod, bridge, {}, globals_base);
+}
+
+int ElfLoader::resolve_multi(so_module* mod, JniBridge* bridge, const std::vector<so_module*>& dep_mods, uint32_t globals_base) {
     int sym_count = 0;
-    uint32_t next_global = globals_base;
+    static uint32_t next_global = 0;
+    if (next_global == 0) next_global = globals_base;
 
     auto process_rel = [&](Elf32_Rel* rel, int count) {
         for (int i = 0; i < count; i++) {
@@ -34,19 +40,36 @@ int ElfLoader::resolve_all_to_bridge(so_module* mod, JniBridge* bridge, uint32_t
                 // Identify if it's a data symbol or a function symbol
                 bool is_data = (sname == "__stack_chk_guard" || sname == "_ctype_" || sname == "__sF");
                 
-                if (is_data && globals_base != 0) {
+                if (is_data && next_global != 0) {
                     *ptr = next_global;
                     next_global += 8; // Advance global pointer
-                    // std::cout << "[Resolve] Global " << name << " -> 0x" << std::hex << *ptr << std::dec << std::endl;
                 } else {
-                    uint32_t bridge_addr = bridge->get_address(sname.c_str());
-                    if (bridge_addr != 0) {
-                        *ptr = bridge_addr;
-                        if (sname == "sinf" || sname == "cosf" || sname == "atof" || sname == "gzread") {
-                            std::cout << "[Resolve] " << name << " (stripped: " << sname << ") -> 0x" << std::hex << bridge_addr << std::dec << std::endl;
+                    // Try dependencies first for non-standard symbols
+                    bool found_in_dep = false;
+                    // Skip standard library symbols for dependency check to ensure they are bridged
+                    static const std::unordered_set<std::string> std_libs = {
+                        "malloc", "free", "calloc", "realloc", "memcpy", "memset", "memmove", "strlen", "strcmp",
+                        "printf", "__android_log_print", "dlopen", "dlsym", "dlclose"
+                    };
+
+                    if (std_libs.find(sname) == std_libs.end()) {
+                        for (auto dep : dep_mods) {
+                            uint32_t vaddr = get_symbol_vaddr(dep, sname);
+                            if (vaddr != 0) {
+                                *ptr = vaddr;
+                                found_in_dep = true;
+                                break;
+                            }
                         }
-                    } else {
-                        std::cerr << "[Resolve] WARNING: No bridge for " << name << std::endl;
+                    }
+
+                    if (!found_in_dep) {
+                        uint32_t bridge_addr = bridge->get_address(sname.c_str());
+                        if (bridge_addr != 0) {
+                            *ptr = bridge_addr;
+                        } else {
+                            std::cerr << "[Resolve] WARNING: No bridge for " << name << std::endl;
+                        }
                     }
                 }
                 sym_count++;
@@ -57,7 +80,7 @@ int ElfLoader::resolve_all_to_bridge(so_module* mod, JniBridge* bridge, uint32_t
     process_rel(mod->reldyn, mod->num_reldyn);
     process_rel(mod->relplt, mod->num_relplt);
     
-    std::cout << "[Resolve] Total external symbols resolved: " << sym_count << std::endl;
+    std::cout << "[Resolve] Module " << mod->soname << ": Total external symbols resolved: " << sym_count << std::endl;
 
     return 0;
 }
@@ -86,6 +109,7 @@ int ElfLoader::load(so_module* mod, const std::string& filename, uint32_t load_a
     char* shstr = (char*)(buffer.data() + mod->shdr[mod->ehdr->e_shstrndx].sh_offset);
 
     mod->base_addr = load_addr;
+    mod->soname = filename;
 
     for (int i = 0; i < mod->ehdr->e_phnum; i++) {
         if (mod->phdr[i].p_type == PT_LOAD) {

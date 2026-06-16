@@ -109,6 +109,11 @@ void JniBridge::register_handler(const std::string& name, BridgeHandler handler)
     addr_to_func[addr].handler = handler;
 }
 
+void JniBridge::register_guest_handler(const std::string& name, uint32_t guest_addr) {
+    uint32_t addr = get_address(name);
+    bridge_to_guest[addr] = guest_addr;
+}
+
 void JniBridge::call_handler(uint32_t address, void* emu_ptr) {
     if (addr_to_func.count(address)) {
         BridgeFunction& func = addr_to_func[address];
@@ -140,6 +145,11 @@ void JniBridge::call_handler(uint32_t address, void* emu_ptr) {
         }
         if (func.handler) {
             func.handler(emu_ptr);
+        } else if (bridge_to_guest.count(address)) {
+            uint32_t guest_addr = bridge_to_guest[address];
+            uint32_t old_lr = emu->get_reg(14);
+            emu->run(guest_addr);
+            emu->set_reg(14, old_lr);
         } else {
             static std::unordered_set<std::string> warned_funcs;
             if (!warned_funcs.count(func.name)) {
@@ -629,9 +639,111 @@ void bridge_GetMethodID(void* emu_ptr) {
     emu->set_reg(0, id);
 }
 
-void bridge_RegisterNatives(void* emu_ptr) {
+#include <dlfcn.h>
+#include <unordered_map>
+
+// Forward declarations for bridge functions
+void bridge_dlopen(void* emu_ptr);
+void bridge_dlsym(void* emu_ptr);
+void bridge_dladdr(void* emu_ptr);
+void bridge_dlerror(void* emu_ptr);
+void bridge_dlclose(void* emu_ptr);
+
+// Externs for module info
+extern so_module g_main_mod;
+extern so_module g_mini_mod;
+extern so_module g_gloss_mod;
+extern uint8_t* g_guest_memory;
+
+void bridge_dlopen(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t filename_ptr = emu->get_reg(0);
+    const char* filename = (filename_ptr != 0) ? (const char*)(g_guest_memory + filename_ptr) : nullptr;
+    
+    std::cout << "[Bridge] dlopen(\"" << (filename ? filename : "NULL") << "\")" << std::endl;
+    
+    // Return fake handles
+    if (filename && strstr(filename, "libswordigo.so")) {
+        emu->set_reg(0, 0x11110000);
+    } else if (filename && strstr(filename, "libmini.so")) {
+        emu->set_reg(0, 0x22220000);
+    } else if (filename && strstr(filename, "libGlossHook.so")) {
+        emu->set_reg(0, 0x33330000);
+    } else {
+        emu->set_reg(0, 0); // Not found
+    }
+}
+
+void bridge_dlsym(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t handle = emu->get_reg(0);
+    uint32_t symbol_ptr = emu->get_reg(1);
+    const char* symbol = (const char*)(g_guest_memory + symbol_ptr);
+    
+    // In our system, we don't really care about the handle, we search all modules.
+    extern ElfLoader* g_loader;
+    uint32_t addr = g_loader->get_symbol_vaddr(&g_main_mod, symbol);
+    if (addr == 0) addr = g_loader->get_symbol_vaddr(&g_mini_mod, symbol);
+    if (addr == 0) addr = g_loader->get_symbol_vaddr(&g_gloss_mod, symbol);
+    
+    if (addr == 0) {
+        addr = emu->bridge->get_address(symbol);
+    }
+
+    if (!emu->quiet_mode) {
+        std::cout << "[Bridge] dlsym(0x" << std::hex << handle << ", \"" << symbol << "\") -> 0x" << addr << std::dec << std::endl;
+    }
+    emu->set_reg(0, addr);
+}
+
+void bridge_dladdr(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint32_t addr = emu->get_reg(0);
+    uint32_t info_ptr = emu->get_reg(1);
+    
+    uint8_t* memory = g_guest_memory;
+    
+    if (addr >= g_main_mod.base_addr && addr < g_main_mod.base_addr + g_main_mod.mem_size) {
+        *(uint32_t*)(memory + info_ptr + 0) = 0x5000; // fake filename ptr
+        strcpy((char*)(memory + 0x5000), "libswordigo.so");
+        *(uint32_t*)(memory + info_ptr + 4) = g_main_mod.base_addr;
+        *(uint32_t*)(memory + info_ptr + 8) = 0; // sname
+        *(uint32_t*)(memory + info_ptr + 12) = 0; // sbase
+        emu->set_reg(0, 1);
+    } else {
+        emu->set_reg(0, 0);
+    }
+}
+
+void bridge_dlerror(void* emu_ptr) {
     Emulator* emu = (Emulator*)emu_ptr;
     emu->set_reg(0, 0);
+}
+
+void bridge_dlclose(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    emu->set_reg(0, 0);
+}
+
+void bridge_RegisterNatives(void* emu_ptr) {
+    Emulator* emu = (Emulator*)emu_ptr;
+    uint8_t* memory = emu->get_memory_base();
+    // jint RegisterNatives(JNIEnv *env, jclass clazz, const JNINativeMethod *methods, jint nMethods);
+    uint32_t methods_ptr = emu->get_reg(2);
+    int nMethods = emu->get_reg(3);
+    
+    for (int i = 0; i < nMethods; i++) {
+        uint32_t method_ptr = methods_ptr + i * 12; // sizeof(JNINativeMethod) = 12
+        uint32_t name_ptr = *(uint32_t*)(memory + method_ptr);
+        uint32_t fn_ptr = *(uint32_t*)(memory + method_ptr + 8);
+        
+        const char* name = (const char*)(memory + name_ptr);
+        if (!emu->quiet_mode) {
+            std::cout << "[JNI] Registering native: " << name << " at 0x" << std::hex << fn_ptr << std::dec << std::endl;
+        }
+        emu->bridge->register_guest_handler(name, fn_ptr);
+    }
+    emu->set_reg(0, 0); // JNI_OK
 }
 
 void bridge_NewGlobalRef(void* emu_ptr) {
@@ -889,7 +1001,6 @@ static void pref_set(const std::string& key, const std::string& val) {
 }
 
 // Resolve a jstring handle (from g_jstrings map) or a raw guest C-string pointer
-static std::unordered_map<uint32_t, std::string> g_jstrings; // forward — defined below
 static std::string resolve_jstring(uint32_t handle, uint8_t* memory) {
     auto it = g_jstrings.find(handle);
     if (it != g_jstrings.end()) return it->second;
@@ -3967,6 +4078,13 @@ void JniBridge::init_standard_bridges() {
     register_handler("eglGetDisplay", bridge_gl_noop);
     register_handler("eglSwapBuffers", bridge_gl_noop);
     register_handler("eglGetProcAddress", bridge_eglGetProcAddress);
+
+    // Dynamic Linking (Guest-side)
+    register_handler("dlopen", bridge_dlopen);
+    register_handler("dlsym", bridge_dlsym);
+    register_handler("dladdr", bridge_dladdr);
+    register_handler("dlerror", bridge_dlerror);
+    register_handler("dlclose", bridge_dlclose);
 }
 
 

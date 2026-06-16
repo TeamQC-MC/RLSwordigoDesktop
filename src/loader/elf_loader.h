@@ -56,6 +56,7 @@ public:
     int relocate(so_module* mod);
     int resolve(so_module* mod, const std::vector<so_default_dynlib>& imports);
     int resolve_all_to_bridge(so_module* mod, JniBridge* bridge, uint32_t globals_base = 0);
+    int resolve_multi(so_module* mod, JniBridge* bridge, const std::vector<so_module*>& dep_mods, uint32_t globals_base = 0);
     
     uint32_t get_symbol_vaddr(so_module* mod, const std::string& name);
 
